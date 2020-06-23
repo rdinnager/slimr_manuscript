@@ -38,6 +38,7 @@ initialize() {
 
 ```{r specify_slim_model}
 library(slimr, quietly = TRUE)
+library(HilbertCurve, quietly = TRUE)
 
 chromosome_sim <- slim_script(
   
@@ -45,6 +46,9 @@ chromosome_sim <- slim_script(
     initializeMutationRate( slimr_template("mut_rate", 1e-7) );
     initializeMutationType("m1", 0.5, "f", 0.0);
     initializeMutationType("m2", 0.5, "f", 0.1);
+    # Convert to substitutions is false so we can keep tracking mutations after fixing.
+    # There is a more efficient way to do this, but this is the easiest
+    # for this demo
     initializeGenomicElementType("g1", c(m1, m2), c(10000, 1));
     initializeGenomicElement(g1, 0, 262142);
     rates = c(1e-9, 0.5, 1e-9, 0.5, 1e-9);
@@ -57,7 +61,7 @@ chromosome_sim <- slim_script(
   }),
   
   slim_block(1, 1000, late(), {
-    slimr_output( sim.outputFull() , "fix_mut", do_every = 10);
+    slimr_output( sim.outputFull() , "fix_mut", do_every = 5);
   })
   
 )
@@ -74,17 +78,66 @@ In order to make a custom visualization for this script we can provide a custom 
 chromosome_sim_test <- slimr_script_render(chromosome_sim,
                                            template = list(N = 100))
 output_test <- slim_run(chromosome_sim_test)
+output_test$output_data
 ```
 
-So now we can write a function that takes the outputted `tibble` and make the desired plot. The first thing we need to do is extract the relevant information from the full output. In this case we only need the information on mutations: their position, and their prevalance in the population. We can use the handy `slimr` function `slim_extract_from_outputFull(type = "mutation")` for this. This function extracts various pieces of the SLiM `outputFull()` function, which contains all information about a population in a SLiM simulation. In this case, we only need the information for the latest generation. Let's test it:
+So now we can write a function that takes the outputted `tibble` and make the desired plot. The first thing we need to do is extract the relevant information from the full output. In this case we only need the information on mutations: their position, and their prevalance in the population. We can use the handy `slimr` function `slim_outputFullextract(type = "mutation")` for this. This function extracts various pieces of the SLiM `outputFull()` function, which contains all information about a population in a SLiM simulation. In this case, we only need the information for the latest generation. Let's test it:
 
 ```{r test_data_extract}
-mut_dat <- slim_outputFull_extract(output_test$output_data[1000],
+mut_dat <- slim_outputFull_extract(output_test$output_data[nrow(output_test$output_data), ],
                                    "mutations")
+mut_dat
 ```
 
+Okay, so now we are ready to make our callback function. First we will create a little function to plot the Hilbert Curve. This uses a trick from the `grDevices` package to hold the display until each plot is finished drawing. This gives the animation produced while running the simulation a smoother appearance, but is not strictly necessary.
+
 ```{r make_callback}
-make_hilbert <- function(data) {
-  mutation_data
+## specify chromosome ranges for plotting
+chrs <- IRanges::IRanges(start = c(0, 87382, 174763),
+                         end = c(87382, 174763, 262143))
+
+bg <- IRanges::IRanges(start = 0, end = 262143)
+
+plot_HC <- function(positions, prevalence, chrs, bg, max_prev) {
+  prevalence <- prevalence / max_prev
+  cols <- colourvalues::color_values(c(0, prevalence, 1))[c(-1, -length(prevalence))]
+  grDevices::dev.hold()
+  hc = HilbertCurve(1, 262143, level = 4, reference = TRUE, arrow = FALSE)
+  hc_polygon(hc, chrs)
+  hc_points(hc, bg, np = 4, gp = gpar(fill = colourvalues::color_values(0)))
+  hc_points(hc, x1 = positions, gp = gpar(fill = cols), np = 4, mean_mode = "weighted")
+  invisible(grDevices::dev.flush())
 }
+
+#grDevices::dev.new(noRStudioGD = TRUE)
+plot_HC(mut_dat$chrome_pos, mut_dat$prevalence, chrs, bg, max_prev = 200)
+
+```
+Now the final callback function:
+
+```{r finally_callback}
+make_hilbert <- function(data, max_prev) {
+  mutation_data <- slim_outputFull_extract(data[nrow(data), ], "mutations")
+  plot_HC(mutation_data$chrome_pos, mutation_data$prevalence, chrs, bg, max_prev)
+  invisible(NULL)
+}
+```
+
+Let's try it out!
+
+```{r run_sim_w_callback, eval=FALSE}
+## change mutation rate and increase pop size
+chromosome_sim_1 <- slimr_script_render(chromosome_sim,
+                                           template = list(N = 500,
+                                                           mut_rate = 1e-6))
+
+## increase generations
+modify(chromosome_sim_1, "end_gen", 3) <- 10000
+
+## open a non-rstudio graphics device (faster and support holding)
+grDevices::dev.new(noRStudioGD = TRUE)
+sim_results <- slim_run(chromosome_sim_1, 
+                        callbacks = list(make_hilbert), 
+                        cb_args = list(max_prev = 1000))
+
 ```
