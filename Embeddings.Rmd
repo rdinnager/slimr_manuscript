@@ -1,0 +1,69 @@
+---
+title: "Demonstrating the Power of Non-Euclidean Embedding with Simulations"
+author: "Russell Dinnage"
+date: "26/06/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Non-Euclidean Embeddings
+
+Genetic data is high-dimensional. Hundreds of thousands to millions of nucleotides or SNPs for every individual. Because of this biologists have turned to dimension reduction techniques for visualizing and exploring genetic datasets, and to attempt to develop intuitions for it. This means that dimension reduction methods are extremely important in the biologist's toolkit. Despite this, the majority of biologists do not extend much beyond a simple PCA for initialy visualisation, and in some case, for important downstream analyses. This is a shame because while PCA is a useful technique that has its place in our toolbox, there is now a plethora of sophisticated methods for this task that should be greater explored in the field of molecular biology, evolution and ecology. In particular, the burgeoning computationally field of manifold learning is ripe to be better exploited in biology. 
+
+This vignette only scratches the surface of this by showing how a simple choice between two kinds of lower dimensional embeddings can have an important effect of interpretation. 
+
+This is based on recipe 10.4.1 from the SLiM manual
+
+```
+initialize() {
+  initializeMutationRate(1e-7);
+  initializeMutationType("m1", 0.5, "f", 0.0); // neutral
+  initializeMutationType("m2", 0.5, "f", 0.1); // balanced
+  initializeGenomicElementType("g1", c(m1,m2), c(999,1));
+  initializeGenomicElement(g1, 0, 99999);
+  initializeRecombinationRate(1e-8);
+}
+
+1 { sim.addSubpop("p1", 500); }
+
+10000 { sim.simulationFinished(); }
+
+fitness(m2) {
+  return 1.5 - sim.mutationFrequencies(p1, mut);
+}
+```
+
+```{r specify_model}
+slim_script(
+  
+  slim_block(initialize(), {
+    initializeMutationRate(1e-7);
+    initializeMutationType("m1", 0.5, "f", 0.0); ## neutral
+    initializeMutationType("m2", 0.5, "f", 0.1); ## balanced
+    initializeMutationType("m3", 0.5, "f", 0.1); ## balanced
+    initializeMutationType("m4", 0.5, "f", 0.1); ## balanced
+    initializeGenomicElementType("g1", m1, 1);
+    initializeGenomicElementType("g2", m2, 1);
+    initializeGenomicElementType("g3", m3, 1);
+    initializeGenomicElementType("g4", m4, 1);
+    initializeGenomicElement(g1, slimr_template("non_muts"), ..non_muts..);
+    initializeRecombinationRate(1e-8);
+  }),
+  
+  slim_block(1, {
+    sim.addSubpop("p1", 500);
+  }),
+  
+  slim_block(10000, {
+    sim.simulationFinished();
+  }),
+  
+  slim_block(fitness(), {
+    return(1.5 - sim.mutationFrequencies(p1, mut));
+  })
+  
+)
+```

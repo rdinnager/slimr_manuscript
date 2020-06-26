@@ -9,6 +9,17 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+```{r color, echo = FALSE, results='asis'}
+# crayon needs to be explicitly activated in Rmd
+options(crayon.enabled = TRUE)
+# Hooks needs to be set to deal with outputs
+# thanks to fansi logic
+if(requireNamespace("fansi", quietly = TRUE)) {
+  old_hooks <- fansi::set_knit_hooks(knitr::knit_hooks, 
+                                     which = c("output", "message", "error"))
+}
+```
+
 ## Custom Live Plots
 
 This document describes how to make a custom visualization of SLiM simulation results that can be used to monitor the output of simulation while they are running. This takes advantage of the custom callbacks feature of `slim_run()`. As an example we will implements a genome visualization using 'Hilbert  curves' to visualize the spatial distribution of mutation in a simulation of genome evolution.
@@ -36,9 +47,12 @@ initialize() {
 
 ```
 
-```{r specify_slim_model}
+```{r libs, message=FALSE}
 library(slimr, quietly = TRUE)
 library(HilbertCurve, quietly = TRUE)
+```
+
+```{r specify_slim_model}
 
 chromosome_sim <- slim_script(
   
@@ -46,9 +60,6 @@ chromosome_sim <- slim_script(
     initializeMutationRate( slimr_template("mut_rate", 1e-7) );
     initializeMutationType("m1", 0.5, "f", 0.0);
     initializeMutationType("m2", 0.5, "f", 0.1);
-    # Convert to substitutions is false so we can keep tracking mutations after fixing.
-    # There is a more efficient way to do this, but this is the easiest
-    # for this demo
     initializeGenomicElementType("g1", c(m1, m2), c(10000, 1));
     initializeGenomicElement(g1, 0, 262142);
     rates = c(1e-9, 0.5, 1e-9, 0.5, 1e-9);
@@ -81,7 +92,7 @@ output_test <- slim_run(chromosome_sim_test)
 output_test$output_data
 ```
 
-So now we can write a function that takes the outputted `tibble` and make the desired plot. The first thing we need to do is extract the relevant information from the full output. In this case we only need the information on mutations: their position, and their prevalance in the population. We can use the handy `slimr` function `slim_outputFullextract(type = "mutation")` for this. This function extracts various pieces of the SLiM `outputFull()` function, which contains all information about a population in a SLiM simulation. In this case, we only need the information for the latest generation. Let's test it:
+So now we can write a function that takes the outputted `tibble` and make the desired plot. The first thing we need to do is extract the relevant information from the full output. In this case we only need the information on mutations: their position, and their prevalance in the population. We can use the handy `slimr` function `slim_outputFull_extract(type = "mutation")` for this. This function extracts various pieces of the SLiM `outputFull()` function, which contains all information about a population in a SLiM simulation. In this case, we only need the information for the latest generation. Let's test it:
 
 ```{r test_data_extract}
 mut_dat <- slim_outputFull_extract(output_test$output_data[nrow(output_test$output_data), ],
@@ -102,7 +113,7 @@ plot_HC <- function(positions, prevalence, chrs, bg, max_prev) {
   prevalence <- prevalence / max_prev
   cols <- colourvalues::color_values(c(0, prevalence, 1))[c(-1, -length(prevalence))]
   grDevices::dev.hold()
-  hc = HilbertCurve(1, 262143, level = 4, reference = TRUE, arrow = FALSE)
+  hc = HilbertCurve(0, 262143, level = 4, reference = TRUE, arrow = FALSE)
   hc_polygon(hc, chrs)
   hc_points(hc, bg, np = 4, gp = gpar(fill = colourvalues::color_values(0)))
   hc_points(hc, x1 = positions, gp = gpar(fill = cols), np = 4, mean_mode = "weighted")
@@ -113,6 +124,7 @@ plot_HC <- function(positions, prevalence, chrs, bg, max_prev) {
 plot_HC(mut_dat$chrome_pos, mut_dat$prevalence, chrs, bg, max_prev = 200)
 
 ```
+
 Now the final callback function:
 
 ```{r finally_callback}
@@ -141,3 +153,5 @@ sim_results <- slim_run(chromosome_sim_1,
                         cb_args = list(max_prev = 1000))
 
 ```
+
+![](figures/HC_callback_vis_demo.gif)
