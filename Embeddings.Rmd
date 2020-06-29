@@ -6,7 +6,8 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
+knitr::knit_hooks$set(webgl = rgl::hook_webgl)
 ```
 
 ## Non-Euclidean Embeddings
@@ -37,10 +38,13 @@ fitness(m2) {
 ```
 
 ```{r specify_model}
+library(slimr)
+set.seed(12345)
+
 slim_script(
   
   slim_block(initialize(), {
-    initializeMutationRate(1e-7);
+    initializeMutationRate(1e-6);
     initializeMutationType("m1", 0.5, "f", 0.0); ## neutral
     initializeMutationType("m2", 0.5, "f", 0.1); ## balanced
     initializeMutationType("m3", 0.5, "f", 0.1); ## balanced
@@ -49,7 +53,64 @@ slim_script(
     initializeGenomicElementType("g2", m2, 1);
     initializeGenomicElementType("g3", m3, 1);
     initializeGenomicElementType("g4", m4, 1);
-    initializeGenomicElement(g1, slimr_template("non_muts"), ..non_muts..);
+    ## place 3 of each selected mutation type in each third of the genome
+    initializeGenomicElement(c(g1, 
+                               g2,
+                               g1,
+                               g2,
+                               g1,
+                               g2,
+                               g1,
+                               g3,
+                               g1,
+                               g3,
+                               g1,
+                               g3, 
+                               g1,
+                               g4,
+                               g1,
+                               g4,
+                               g1,
+                               g4,
+                               g1), 
+                             start = c(0, 
+                                       1111, 
+                                       1112, 
+                                       2222, 
+                                       2223,
+                                       3333,
+                                       3334,
+                                       4444,
+                                       4445,
+                                       5555,
+                                       5556,
+                                       6666,
+                                       6667,
+                                       7777,
+                                       7778,
+                                       8888,
+                                       8889,
+                                       9999,
+                                       10000), 
+                             end =   c(1110, 
+                                       1111, 
+                                       2221, 
+                                       2222,
+                                       3332,
+                                       3333,
+                                       4443,
+                                       4444,
+                                       5554,
+                                       5555,
+                                       6665,
+                                       6666,
+                                       7776,
+                                       7777,
+                                       8887,
+                                       8888,
+                                       9998,
+                                       9999,
+                                       11109));
     initializeRecombinationRate(1e-8);
   }),
   
@@ -57,13 +118,109 @@ slim_script(
     sim.addSubpop("p1", 500);
   }),
   
+  slim_block(1, 10000, late(), {
+    slimr_output( sim.outputFull() , "fix_mut", do_every = 100);
+  }),
+  
   slim_block(10000, {
     sim.simulationFinished();
   }),
   
-  slim_block(fitness(), {
-    return(1.5 - sim.mutationFrequencies(p1, mut));
+  slim_block(fitness(m2, p1), {
+    return(1.5 - sim.mutationFrequencies(subpop, mut));
   })
   
-)
+) -> script_1
+
+script_1
 ```
+
+For the purposes of testing, we've added stabilizing selection to one of the mutation types (m2). Later in this vignette we will use some of the advanced features of `slimr` to add custom stabilizing selection to each mutation type which is subpopulation specific. But first let's check this script works.
+
+```{r test_script}
+test <- slim_run(script_1)
+test_muts<- slim_outputFull_extract(test$output_data, "mutations")
+test_muts
+
+```
+
+```{r plot_equi}
+library(ggplot2)
+test_muts %>%
+  dplyr::filter(mut_type == "m2") %>%
+  dplyr::group_by(generation, chrome_pos) %>%
+  dplyr::summarise(prevalence = mean(prevalence)) %>%
+  ggplot2::ggplot(ggplot2::aes(generation, prevalence)) +
+  ggplot2::geom_path(ggplot2::aes(colour = as.factor(chrome_pos)), alpha = 0.8) +
+  ggplot2::scale_y_continuous(limits = c(0, 1000)) +
+  ggplot2::theme_minimal()
+```
+
+So we can see that the m2 mutations each have been kept at a intermediate frequency by stabilizing selection. It stays at a frequency of roughly 0.5 (bearing in mind there are 500 diploid individuals, leading to 1000 genomes in the population). This equilibrium value is the result of the simple fitness callback we used, where a stabilizing relative fitness of 1.0 is reached at 0.5 (1.5 - 0.5). If frequency is higher than 0.5, the relative fitness become less than 1.0, if frequency is lower, it becomes greater than 1.0, so the mutation will tend to fluctuate around this value. We can create a general equation to produce stabilizing selection like this `rel_fitness = (1 + eq) - mut_freq`, where `eq` is the desired equilibrium frequency, and `mut_freq` is the current frequency of the mutation.
+
+Okay, so why did we set up this model? We can use this model to simulate subpopulation with different pattern of selection on a small number of genomic sites. We can use this set up then to generate subpopulation that differ on a known number of dimensions (3 in this case, with three types of mutations). We can then use dimension reduction techniques to see if they can accurately represent patterns we generate in the low-dimensional space, in the presence of loads of noise from the background evolutionary processes being simulated by SLiM, such as drift, background neutral mutations, and linkage disequilibrium with the sites under selection. As an additional wrinkle, we will generate patterns in only two effective dimensions. It will become clear as we go along, why this is a useful thing to do.
+
+## Create low-dimensional patterns - comparing planar and sperical geometry
+
+We will generate some random data to represent a set of selection coefficients for a number of subpopulations. We will simulate 40 subpopulations, initially. We will first generate random points in 3d space, which we will then thin out such that most of the information is contained in only two dimensions. We will use two strategies for this, 1) thinning to a 2d plane, 2) thinning to the surface of a 3d sphere. These two scenarios will both effectively only make use of 2 dimensions, but the difference will be apparent in our dimension reduction. The following could be done in multiple ways, but to further showcase the power of combining SLiM simulation and the vast array of powerful R packages, we will use two packages designed for manipulating 3d objects in R for this next part, `Rvcg` and `Morpho`. As a bonus, we can easily visualise our results in 3d using the `rgl` package. First we generate a 3d point cloud, then create objects representing planes, and spheres.
+
+```{r make_random_sel}
+library(Rvcg)
+library(rgl)
+library(proxy)
+
+pnts <- cbind(runif(100000, -0.5, 0.5), 
+              runif(100000, -0.5, 0.5), 
+              runif(100000, -0.5, 0.5))
+
+rgl::points3d(pnts)
+
+```
+
+Now  we create a random plane, calculate the distance of our points to it, then filter them to only those very close to the plane (less than 0.01 distance).
+
+```{r random_plane, webgl=TRUE, results='hide'}
+random_plane <- list(V1 = rnorm(3), v2 = rnorm(3), v3 = rnorm(3))
+pnts_on_plane <- Morpho::points2plane(pnts, v1 = random_plane$V1,
+                                      v2 = random_plane$v2,
+                                      v3 = random_plane$v3)
+pnt_dists <- proxy::dist(pnts, pnts_on_plane, pairwise = TRUE)
+plane_pts <- pnts[pnt_dists < 0.01, ][1:40, ]
+
+rgl::open3d()
+rgl::spheres3d(plane_pts, radius = 0.05)
+
+```
+
+We now repeat a similar procedure for the spherical points. We calculate the distance between our random points to a sphere (of radius 2), then only retain those very close to it. Generally 
+
+```{r sphere_pnts, webgl=TRUE, results='hide'}
+sphere <- Rvcg::vcgSphere() %>%
+  Morpho::scalemesh(0.5)
+pnts_on_sphere <- Rvcg::vcgClost(pnts, sphere)
+sphere_pts <-  Morpho::vert2points(pnts_on_sphere)[abs(pnts_on_sphere$quality) < 0.01, ]
+sphere_pts <- sphere_pts[sample.int(nrow(sphere_pts), 40), ]
+
+rgl::open3d()
+rgl::spheres3d(sphere_pts, radius = 0.05)
+```
+Now that we have some 3d points, we can translate these into equilibrium frequencies for our set of three mutations types. We just need to scale them between 0 and 1 as a start.
+
+```{r scale_pts}
+plane_pts <- plane_pts + 0.5
+sphere_pts <- sphere_pts + 0.5
+
+sphere_pts
+```
+As a sanity check we can make sure out spherical points have nearly the same Euclidean norm (from 0.5), equal or close to 0.5.
+```{r sanity_check}
+apply(sphere_pts, 1, function(x) sqrt(sum((x-0.5)^2)))
+```
+
+We first need to make a new `slimr_script`, where we can include subpopulation specific equilibrium frequencies for our mutations. We will do this using some advanced features of `slimr`, specifically, by using 'non-standard evaluation' or NSE, as exemplified by the `rlang` package. We will make use of the 'forcing' operator `!!`, as well as the 'force-splice' operator `!!!`. `slimr` fully supports these operators, which do what they sound like, they force part of R code to be evaluated selectively, and their results inserted directly into code. This 'metaprogramming' technique allows us to do some powerful things in conjunction with SLiM through `slimr`. Here we will programatically generate SLiM code blocks to specify custom `fitness()` callback, giving our mutations their desired equilibrium frequencies. First let's create these code blocks, which we can then 'splice' into a modified `slim_script` call.
+
+```{r gen_code_blocks}
+
+
+```
+
