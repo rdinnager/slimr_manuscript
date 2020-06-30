@@ -1,0 +1,108 @@
+---
+title: "Walking the Abstract Syntax Tree"
+author: "Russell Dinnage"
+date: "30/06/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##Abstract Syntax Trees
+ 
+ I recently had reason to want to do something somewhat unusual. I wanted to take a R script, evaluate it, replacing all calls with their output. Sounds a little ctrange, but it can be handy if you are trying to make a domain specific language (DSL), where you can write R code that converts itself into, say, another language. It turns out you can learn a lot about how R does things under the hood bu attempting this sort of task, so I thought I'd share it in case anyone else finds it helful or at least interesting. Much of the following has been derived from a combination of reading Advanced R by Hadley Wickham, and a lot of experimentation. We will use the `rlang` package extensively, though it is possibly to similar things with base R, it will just be a little more difficult and probably more idosyncratic.
+ 
+ I'm going to start be writing a little set of functions that output expressions. I will then use these function in a set of expressions, which I will be able to evaluate and have the functions replace themselves with the expressions they generate. They will also generate side-effects by printing message to the console, which will help know that the functions did indeed "go off".
+ 
+ ```{r setup_funs}
+ 
+ diff_version <- function(x) {
+  x <- rlang::enexpr(x)
+  message("Replaced with a different version!")
+  rlang::expr(different_version(!!x))
+ }
+ 
+ reverse_args <- function(r_expr) {
+  r_expr <- rlang::enexpr(r_expr)
+  
+  r_expr[2:length(r_expr)] <- rev(r_expr[2:length(r_expr)])
+  
+  message("Reversed!")
+  
+  r_expr
+ }
+ 
+ keep_me <- function(...) {
+ message("I'm unchanged!")
+  rlang::expr(keep_me(!!!rlang::dots_splice(...)))
+ }
+ 
+ diff_version("Hello World!")
+ 
+ reverse_args(bizarro("!", "World", "Hello"))
+ 
+ keep_me("anything", "else?", 1, 2, 3)
+```
+
+A key difficulty is of course that call can be nested in R. This is why we need to walk the Abstract Syntax Tree, or AST. Let's write an example script to demonstrate this.
+
+```{r example_script}
+
+test_expr <- rlang::expr({
+  diff_version(x)
+  reverse_args(keep_me("!", "World", "Hello"))
+  keep_me(1, 2, 3, diff_version(print(x)))
+  y
+})
+rlang::expr_print(test_expr)
+
+```
+
+To walk the AST, we will write a recursive function that finds all calls, and then evaluates them, returning the results in a list that mirrors the nested structure of the original AST. It should end up having the same exact structure if it works correctly. Everything other than calls will be returned as is.
+
+```{r recurse}
+expr_type <- function(x) {
+  if (rlang::is_syntactic_literal(x)) {
+    "constant"
+  } else if (is.symbol(x)) {
+    "symbol"
+  } else if (is.call(x)) {
+    "call"
+  } else if (is.pairlist(x)) {
+    "pairlist"
+  } else {
+    typeof(x)
+  }
+}
+
+switch_expr <- function(x, ...) {
+  switch(expr_type(x),
+    ...,
+    stop("Don't know how to handle type ", typeof(x), call. = FALSE)
+  )
+}
+
+replace_and_eval <- function(x) {
+  new_expr <- call_self_replace(x)
+  rlang::eval_tidy(new_expr)
+}
+
+call_self_replace <- function(x) {
+  switch_expr(x,
+    # Base cases
+    symbol = ,
+    constant = x,
+
+    # Recursive cases
+    call = ,
+    pairlist = rlang::eval_tidy(x)
+  )
+}
+
+test <- purrr::map(test_expr,
+            call_self_replace)
+test2 <- rlang::exprs(!!!test)
+
+```
+

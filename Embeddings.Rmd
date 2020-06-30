@@ -50,10 +50,10 @@ slim_script(
     initializeMutationType("m3", 0.5, "f", 0.1); ## balanced
     initializeMutationType("m4", 0.5, "f", 0.1); ## balanced
     initializeGenomicElementType("g1", m1, 1);
-    initializeGenomicElementType("g2", m2, 1);
-    initializeGenomicElementType("g3", m3, 1);
-    initializeGenomicElementType("g4", m4, 1);
-    ## place 3 of each selected mutation type in each third of the genome
+    initializeGenomicElementType("g2", c(m1, m2), c(0.1, 0.9));
+    initializeGenomicElementType("g3", c(m1, m3), c(0.1, 0.9));
+    initializeGenomicElementType("g4", c(m1, m4), c(0.1, 0.9));
+    ## place 3 blocks of each selected mutation type in each third of the genome
     initializeGenomicElement(c(g1, 
                                g2,
                                g1,
@@ -75,42 +75,42 @@ slim_script(
                                g1), 
                              start = c(0, 
                                        1111, 
-                                       1112, 
+                                       1312, 
                                        2222, 
-                                       2223,
+                                       2423,
                                        3333,
-                                       3334,
+                                       3534,
                                        4444,
-                                       4445,
+                                       4645,
                                        5555,
-                                       5556,
+                                       5756,
                                        6666,
-                                       6667,
+                                       6867,
                                        7777,
-                                       7778,
+                                       7978,
                                        8888,
-                                       8889,
+                                       9089,
                                        9999,
-                                       10000), 
+                                       12000), 
                              end =   c(1110, 
-                                       1111, 
+                                       1311, 
                                        2221, 
-                                       2222,
+                                       2422,
                                        3332,
-                                       3333,
+                                       3533,
                                        4443,
-                                       4444,
+                                       4644,
                                        5554,
-                                       5555,
+                                       5755,
                                        6665,
-                                       6666,
+                                       6866,
                                        7776,
-                                       7777,
+                                       7977,
                                        8887,
-                                       8888,
+                                       9088,
                                        9998,
-                                       9999,
-                                       11109));
+                                       11099,
+                                       13109));
     initializeRecombinationRate(1e-8);
   }),
   
@@ -118,16 +118,17 @@ slim_script(
     sim.addSubpop("p1", 500);
   }),
   
-  slim_block(1, 10000, late(), {
-    slimr_output( sim.outputFull() , "fix_mut", do_every = 100);
+  slim_block(1, 5000, late(), {
+    slimr_output( sim.outputFull() , "fix_mut", do_every = 10);
   }),
   
-  slim_block(10000, {
+  slim_block(5000, {
     sim.simulationFinished();
   }),
   
   slim_block(fitness(m2, p1), {
-    return(1.5 - sim.mutationFrequencies(subpop, mut));
+    dominance = asInteger(homozygous) * 0.5 + 0.5;
+    return(1.5 - sim.mutationFrequencies(subpop, mut) * dominance);
   })
   
 ) -> script_1
@@ -146,17 +147,18 @@ test_muts
 
 ```{r plot_equi}
 library(ggplot2)
-test_muts %>%
-  dplyr::filter(mut_type == "m2") %>%
-  dplyr::group_by(generation, chrome_pos) %>%
-  dplyr::summarise(prevalence = mean(prevalence)) %>%
-  ggplot2::ggplot(ggplot2::aes(generation, prevalence)) +
-  ggplot2::geom_path(ggplot2::aes(colour = as.factor(chrome_pos)), alpha = 0.8) +
+m2 <- test_muts %>%
+  dplyr::filter(mut_type == "m2")
+
+ggplot2::ggplot(m2, ggplot2::aes(generation, prevalence)) +
+  ggplot2::geom_path(ggplot2::aes(group = as.factor(unique_id), 
+                                  colour = as.factor(unique_id)), alpha = 0.25) +
   ggplot2::scale_y_continuous(limits = c(0, 1000)) +
-  ggplot2::theme_minimal()
+  ggplot2::theme_minimal() +
+  theme(legend.position = "none")
 ```
 
-So we can see that the m2 mutations each have been kept at a intermediate frequency by stabilizing selection. It stays at a frequency of roughly 0.5 (bearing in mind there are 500 diploid individuals, leading to 1000 genomes in the population). This equilibrium value is the result of the simple fitness callback we used, where a stabilizing relative fitness of 1.0 is reached at 0.5 (1.5 - 0.5). If frequency is higher than 0.5, the relative fitness become less than 1.0, if frequency is lower, it becomes greater than 1.0, so the mutation will tend to fluctuate around this value. We can create a general equation to produce stabilizing selection like this `rel_fitness = (1 + eq) - mut_freq`, where `eq` is the desired equilibrium frequency, and `mut_freq` is the current frequency of the mutation.
+So we can see that the m2 mutations each tend to rise to and are kept at an intermediate frequency by stabilizing selection. It stays at a frequency of roughly 0.5 (bearing in mind there are 500 diploid individuals, leading to 1000 genomes in the population). This equilibrium value is the result of the simple fitness callback we used, where a stabilizing relative fitness of 1.0 is reached at 0.5 (1.5 - 0.5). If frequency is higher than 0.5, the relative fitness become less than 1.0, if frequency is lower, it becomes greater than 1.0, so the mutation will tend to fluctuate around this value. We can create a general equation to produce stabilizing selection like this `rel_fitness = (1 + eq) - mut_freq`, where `eq` is the desired equilibrium frequency, and `mut_freq` is the current frequency of the mutation.
 
 Okay, so why did we set up this model? We can use this model to simulate subpopulation with different pattern of selection on a small number of genomic sites. We can use this set up then to generate subpopulation that differ on a known number of dimensions (3 in this case, with three types of mutations). We can then use dimension reduction techniques to see if they can accurately represent patterns we generate in the low-dimensional space, in the presence of loads of noise from the background evolutionary processes being simulated by SLiM, such as drift, background neutral mutations, and linkage disequilibrium with the sites under selection. As an additional wrinkle, we will generate patterns in only two effective dimensions. It will become clear as we go along, why this is a useful thing to do.
 
