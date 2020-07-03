@@ -14,7 +14,7 @@ knitr::knit_hooks$set(webgl = rgl::hook_webgl)
 
 Genetic data is high-dimensional. Hundreds of thousands to millions of nucleotides or SNPs for every individual. Because of this biologists have turned to dimension reduction techniques for visualizing and exploring genetic datasets, and to attempt to develop intuitions for it. This means that dimension reduction methods are extremely important in the biologist's toolkit. Despite this, the majority of biologists do not extend much beyond a simple PCA for initialy visualisation, and in some case, for important downstream analyses. This is a shame because while PCA is a useful technique that has its place in our toolbox, there is now a plethora of sophisticated methods for this task that should be greater explored in the field of molecular biology, evolution and ecology. In particular, the burgeoning computationally field of manifold learning is ripe to be better exploited in biology. 
 
-This vignette only scratches the surface of this by showing how a simple choice between two kinds of lower dimensional embeddings can have an important effect of interpretation. 
+This vignette only scratches the surface of this by showing how a simple choice between two kinds of lower dimensional embeddings can have an important effect on interpretation. 
 
 This is based on recipe 10.4.1 from the SLiM manual
 
@@ -44,7 +44,7 @@ set.seed(12345)
 slim_script(
   
   slim_block(initialize(), {
-    initializeMutationRate(1e-6);
+    initializeMutationRate(1e-5);
     initializeMutationType("m1", 0.5, "f", 0.0); ## neutral
     initializeMutationType("m2", 0.5, "f", 0.1); ## balanced
     initializeMutationType("m3", 0.5, "f", 0.1); ## balanced
@@ -219,9 +219,74 @@ As a sanity check we can make sure out spherical points have nearly the same Euc
 apply(sphere_pts, 1, function(x) sqrt(sum((x-0.5)^2)))
 ```
 
-We first need to make a new `slimr_script`, where we can include subpopulation specific equilibrium frequencies for our mutations. We will do this using some advanced features of `slimr`, specifically, by using 'non-standard evaluation' or NSE, as exemplified by the `rlang` package. We will make use of the 'forcing' operator `!!`, as well as the 'force-splice' operator `!!!`. `slimr` fully supports these operators, which do what they sound like, they force part of R code to be evaluated selectively, and their results inserted directly into code. This 'metaprogramming' technique allows us to do some powerful things in conjunction with SLiM through `slimr`. Here we will programatically generate SLiM code blocks to specify custom `fitness()` callback, giving our mutations their desired equilibrium frequencies. First let's create these code blocks, which we can then 'splice' into a modified `slim_script` call.
+We first need to make a new `slimr_script`, where we can include subpopulation specific equilibrium frequencies for our mutations. We will do this using some advanced features of `slimr`, specifically, by using 'non-standard evaluation' or NSE, as exemplified by the `rlang` package. We will make use of the 'forcing' operator `!!`, as well as the 'force-splice' operator `!!!`. `slimr` fully supports these operators, which do what they sound like, they force part of R code to be evaluated selectively, and their results inserted directly into code. This 'metaprogramming' technique allows us to do some powerful things in conjunction with SLiM through `slimr`. Here we will programmatically generate SLiM code blocks to specify custom `fitness()` callback, giving our mutations their desired equilibrium frequencies. First let's create these code blocks, which we can then 'splice' into a modified `slim_script` call. We will use a set of loops to make it obvious what we are doing here, but you could also use `purrr` for this purpose. SLiM code passed into `slim_block` is usually interpreted as verbatim code, with the exception of special `slimr` function such as `slimr_template`, `slimr_output`, etc.. This means that if you want to pass in the result of an R function, you need to use a special operator to let slimr know that the code is not meant to be SLiM code, but rather you want it evaluated in R before becoming SLiM code. Here is an example where the result may not be what you are expecting:
+
+```{r example_mistake}
+x <- 1
+slim_script(
+  slim_block(initialize(), {
+    initializeMutationRate(1e-7); 
+    initializeMutationType("m1", 0.5, "f", 0.0);
+    initializeGenomicElementType("g1", m1, 1.0);
+    initializeGenomicElement(g1, 0, 99999);
+    initializeRecombinationRate(1e-8);
+  }),
+  slim_block(1, {
+    sim.addSubpop(paste("p", x, sep = ""), 500)    
+  })
+) -> mistake
+
+mistake
+
+slim_run(mistake, simple_run = TRUE, show_output = TRUE)
+```
+
+```{r example_mistake_fix}
+x <- 1
+slim_script(
+  slim_block(initialize(), {
+    initializeMutationRate(1e-7); 
+    initializeMutationType("m1", 0.5, "f", 0.0);
+    initializeGenomicElementType("g1", m1, 1.0);
+    initializeGenomicElement(g1, 0, 99999);
+    initializeRecombinationRate(1e-8);
+  }),
+  slim_block(1, {
+    sim.addSubpop(!!paste("p", x, sep = ""), 500)    
+  })
+) -> mistake_fixed
+
+mistake_fixed
+
+slim_run(mistake_fixed, simple_run = TRUE, show_output = TRUE)
+```
+
 
 ```{r gen_code_blocks}
+
+p_names <- paste0("p", seq_len(nrow(plane_pts)))
+m_names <- paste0("m", 2:4)
+
+block_list <- list()
+
+for(i in seq_len(nrow(plane_pts))) {
+  block_list[[i]] <- list()
+  for(j in seq_len(ncol(plane_pts))) {
+    ## this just shows the code that is getting executed
+    rlang::expr(slim_block(fitness(!!slimr_name(m_names[j]), !!slimr_name(p_names[i])), {
+      dominance = asInteger(homozygous) * 0.5 + 0.5;
+      return(1 + (!!plane_pts[i, j] - sim.mutationFrequencies(subpop, mut) * dominance));
+    })) %>%
+      rlang::expr_print()
+    
+    ## actually make the slim_blocks
+    block_list[[i]][[j]] <- slim_block(fitness(!!slimr_name(m_names[j]), !!slimr_name(p_names[i])), {
+      dominance = asInteger(homozygous) * 0.5 + 0.5;
+      return(1 + (!!plane_pts[i, j] - sim.mutationFrequencies(subpop, mut) * dominance));
+    })
+    
+  }
+}
 
 
 ```

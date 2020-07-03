@@ -9,13 +9,13 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-##Abstract Syntax Trees
+## Abstract Syntax Trees
  
- I recently had reason to want to do something somewhat unusual. I wanted to take a R script, evaluate it, replacing all calls with their output. Sounds a little ctrange, but it can be handy if you are trying to make a domain specific language (DSL), where you can write R code that converts itself into, say, another language. It turns out you can learn a lot about how R does things under the hood bu attempting this sort of task, so I thought I'd share it in case anyone else finds it helful or at least interesting. Much of the following has been derived from a combination of reading Advanced R by Hadley Wickham, and a lot of experimentation. We will use the `rlang` package extensively, though it is possibly to similar things with base R, it will just be a little more difficult and probably more idosyncratic.
+ I recently had reason to want to do something somewhat unusual. I wanted to take a R script, evaluate it, replacing all calls with their output. Sounds a little strange, but it can be handy if you are trying to make a domain specific language (DSL), where you can write R code that converts itself into, say, another language. It turns out you can learn a lot about how R does things under the hood bu attempting this sort of task, so I thought I'd share it in case anyone else finds it helpful or at least interesting. Much of the following has been derived from a combination of reading Advanced R by Hadley Wickham, and a lot of experimentation. We will use the `rlang` package extensively, though it is possibly to similar things with base R, it will just be a little more difficult and probably more idiosyncratic.
  
  I'm going to start be writing a little set of functions that output expressions. I will then use these function in a set of expressions, which I will be able to evaluate and have the functions replace themselves with the expressions they generate. They will also generate side-effects by printing message to the console, which will help know that the functions did indeed "go off".
  
- ```{r setup_funs}
+ ```{r set_up_funs}
  
  diff_version <- function(x) {
   x <- rlang::enexpr(x)
@@ -43,6 +43,7 @@ knitr::opts_chunk$set(echo = TRUE)
  reverse_args(bizarro("!", "World", "Hello"))
  
  keep_me("anything", "else?", 1, 2, 3)
+ 
 ```
 
 A key difficulty is of course that call can be nested in R. This is why we need to walk the Abstract Syntax Tree, or AST. Let's write an example script to demonstrate this.
@@ -59,7 +60,7 @@ rlang::expr_print(test_expr)
 
 ```
 
-To walk the AST, we will write a recursive function that finds all calls, and then evaluates them, returning the results in a list that mirrors the nested structure of the original AST. It should end up having the same exact structure if it works correctly. Everything other than calls will be returned as is.
+To walk the AST, we will write a recursive function that finds all calls, and then evaluates them, returning the results in a list that mirrors the nested structure of the original AST. It should end up having the same exact structure if it works correctly. Everything other than calls will be returned as is. Lastly we will have a special object type called an `evaluated_call`, the need of which will become clear shortly.
 
 ```{r recurse}
 expr_type <- function(x) {
@@ -68,7 +69,11 @@ expr_type <- function(x) {
   } else if (is.symbol(x)) {
     "symbol"
   } else if (is.call(x)) {
-    "call"
+    if(inherits(x, "evaluated_call")) {
+      "evaluated_call"
+    } else {
+      "call"
+    }
   } else if (is.pairlist(x)) {
     "pairlist"
   } else {
@@ -83,20 +88,39 @@ switch_expr <- function(x, ...) {
   )
 }
 
+eval_if <- function(x) {
+  if(is.call(x)) {
+    res <- rlang::eval_tidy(new_expr)
+    res <- rlang::call2(res[[1]], !!!res[2:length(res)])
+    class(res) <- "evaluated_call"
+  } else {
+    res <- x
+  }
+  res
+}
+
 replace_and_eval <- function(x) {
-  new_expr <- call_self_replace(x)
-  rlang::eval_tidy(new_expr)
+  new_expr <- purrr::map(x,
+                         call_self_replace)
+  
+  res <- purrr::map(new_expr,
+                    eval_if)
+  
+  res
 }
 
 call_self_replace <- function(x) {
+  print(expr_type(x))
+  print(x)
   switch_expr(x,
     # Base cases
     symbol = ,
-    constant = x,
+    constant = ,
+    evaluated_call = x,
 
     # Recursive cases
-    call = ,
-    pairlist = rlang::eval_tidy(x)
+    call = replace_and_eval(x),
+    pairlist = replace_and_eval(x)
   )
 }
 
