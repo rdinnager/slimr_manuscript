@@ -1,0 +1,412 @@
+---
+title: "Using slimr to investigate small mammal population genetics in a periodic environment"
+author: "Russell Dinnage"
+date: "18/09/2020"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## A look at the data
+
+An ongoing project in the Simpson Desert of central Australia is producing genomic sequence data for small mammals and reptiles collected over more than 30 years. We have some preliminary data from this project for the Sandy Inland Mouse (*Pseudomys hermannsburgensis*) that we'd like to use to explore, through data analysis and simulation, and hopefully gain some insight into where this project might ultimately take us. First let's load all the packages we use in the example, and then load the genetic data we will be working with. The data is stored in an `.Rdata` file containing a `genlight` object, which stores binary SNP data, defined in the `adegenet` package. We also have demographic data in the form of trap capture data.
+
+```{r setup_data}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(mapview)
+library(purrr)
+library(conflicted)
+library(future)
+library(furrr)
+library(lubridate)
+library(ggplot2)
+library(directlabels)
+library(patchwork)
+library(sf)
+library(adegenet)
+library(dartR)
+library(here)
+library(slimr)
+
+## because filter function exists in multiple packages we use
+## the conflicted package to make sure we R uses the version in dplyr
+conflict_prefer("filter", "dplyr") 
+
+## load data
+gen <- read_rds("data/herm.rdata")
+
+gen
+
+abund <- read_csv("data/mammal_captures.csv")
+
+abund
+
+```
+
+So we have SNP sequences from 167 individuals taken over three years and several different sites. Before we take a look at the genetic data, let's set the environmental context a bit. These small mammals live in the Simpson Desert, an arid ecosystem characterized by long periods of little rain, with occasional major rainfall events. These tend to occur every 6-10 years or so. After rainfall events, the desert turns green, it can be seen from space, and our analysis of satellite relectance data confirms massive spikes in productivity after these rainfalls. Plants grow, flower and seed massively during these periods, and so food is abundant for small mammals. We can see the regular pulse of rainfall just by looking at the mammal abundances -- *Pseudomys hermannsburgensis* in particular responds quickly to rainfall. Let's look at our trap data to see this pattern.
+
+```{r analyse_traps}
+## give more descriptive names to sites
+sites <- tribble(~pop, ~SiteName,
+                 "CS", "Carlo",
+                 "FRN", "Field River North",
+                 "FRS", "Field River South",
+                 "KSE", "Kunnamuka Swamp East",
+                 "MC", "Main Camp",
+                 "SS", "South Site",
+                 "WS", "Way Site"
+)
+
+abund_summ <- abund %>%
+  select(-`Notomys alexis`, -`Sminthopsis youngsoni`) %>%
+  left_join(sites) %>%
+  drop_na(pop) %>%
+  ## convert month-year character column to proper dates using lubridate
+  separate(MonthYear, c("Month", "year"), "\\.") %>%
+  mutate(Month = sapply(Month, function(x) which(month.abb == x))) %>%
+  mutate(date = myd(paste(Month, year, sep = "-"), truncated = 1)) %>%
+  ## summarise by site and date
+  group_by(date, pop) %>%
+  summarise(abund = mean(`Pseudomys hermannsburgensis`),
+            .groups = "drop") 
+
+ggplot(abund_summ, aes(date, abund)) +
+  geom_path(aes(colour = pop)) +
+  geom_dl(aes(label = pop), method = "last.qp") +
+  aes(colour = pop) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+
+```
+
+Wow, those pulses are quite clear and quite extreme!
+
+Okay, now let's go have a look at the SNP data we have for these populations.
+
+First, we will extract the metadata for the genetic samples and have a look at how they are distributed in the Simpson Desert.
+
+```{r map_gene_data}
+gen_meta <- gen@other$ind.metrics
+
+gen_meta <- gen_meta %>%
+  as_tibble() %>%
+  ## fix some minor errors in genetic metadata with respect to site names:
+  mutate(pop = case_when(pop == "FR" ~ substr(as.character(SiteGrid), 1, 3),
+                         pop == "KS" ~ "KSE",
+                         TRUE ~ as.character(pop))) %>%
+  left_join(sites)
+
+gen_meta
+```
+
+Extract and plot site coordinates:
+
+```{r plot_map, fig.cap="This is an interactive map in the html version", fig.height=8, fig.width=8}
+coords <- gen_meta %>%
+  group_by(pop) %>%
+  summarise(lon = mean(lon),
+            lat = mean(lat)) %>%
+  sf::st_as_sf(coords = c("lon", "lat"), crs = 4326)
+
+mapview(coords, label = coords$pop, map.types = "Esri.WorldImagery")
+```
+
+Looks like our sites cluster into roughly 3 spatial groups. For simplicity we can merge these sites into 3 subpopulations, which will make it a bit simpler for our simulation later. 
+
+```{r merge_pops}
+coords_3 <- gen_meta %>%
+  mutate(three_pop = case_when(pop %in% c("MC", "SS", "WS") ~ "BR",
+                               pop %in% c("FRN", "FRS") ~ "BL",
+                               pop %in% c("KSE", "CS") ~ "TR")) %>%
+  group_by(three_pop) %>%
+  summarise(lon = mean(lon),
+         lat = mean(lat)) %>%
+  ungroup() %>%
+  sf::st_as_sf(coords = c("lon", "lat"), crs = 4326)
+
+mapview(coords_3, label = coords_3$three_pop, map.types = "Esri.WorldImagery")
+```
+
+As it happens these merged subpopulations are roughly equidistant, arranged in a triangle. If we assume the terrain between them is similarly easy to traverse we can simplify our model of the system even more and assume that all else being equal these subpopulations should have roughly similar migration rates between them. We called these subpopulations "BR", "BL", and "TR", for Bottom Right, Bottom Left, and Top Right (creatively named I know). 
+
+Given this setup, let us have a look at the Fst values between these three subpopulations over the three years. We will use the `dartR` package, which is package designed to work with data produced using the DArT method, to calculate pairwise Fst for our subpopulations.
+
+```{r calc_fst}
+
+gen_meta <- gen_meta %>%
+  mutate(three_pop = case_when(pop %in% c("MC", "SS", "WS") ~ "BR",
+                               pop %in% c("FRN", "FRS") ~ "BL",
+                               pop %in% c("KSE", "CS") ~ "TR"))
+
+gen@other$ind.metrics <- gen_meta 
+pop(gen) <- gen_meta$three_pop
+
+## remove population we have genetic data for but no abundance data
+gen <- gen[gen@other$ind.metrics$pop != "WS"]
+
+
+fst <- gl.fst.pop(gen, nboots = 1L)
+
+fst
+```
+
+That is the overall Fst, but we really want to know how that is changing over our three sampling time points. We have three years of data, which happen to span a major rain event, from 2006, 2007, and 2008, where there was a major rain event in 2007. Let's look at the pairwise Fst over the three years.
+
+```{r three_years_fst}
+fst_by_year <- map(c(2006, 2007, 2008),
+                   ~gl.fst.pop(gen[gen@other$ind.metrics$year == .x, ],
+                               nboots = 1L) %>%
+                     as.dist() %>%
+                     as.matrix())
+names(fst_by_year) <- c("2006", "2007", "2008")
+fst_by_year
+```
+
+We can visualize that over the three years:
+
+```{r vis_fst}
+fst_df <- imap_dfr(fst_by_year,
+                   ~combn(c("BR", "BL", "TR"), 2) %>%
+                     t() %>%
+                     as.data.frame() %>%
+                     rename(pop1 = V1, pop2 = V2) %>%
+                     mutate(fst = .x[cbind(pop1, pop2)],
+                            year = .y,
+                            pop_combo = paste(pop1, pop2, sep = " to ")))
+
+ggplot(fst_df, aes(year, fst)) +
+  geom_path(aes(colour = pop_combo, group = pop_combo)) +
+  theme_minimal()
+```
+So we see that during the rainfall year a precipitous drop in Fst occurs, which remains quite low the following year. Now, can we think of a reason why this pattern might occur? We have a hypothesis! First, we'll lay it out, then we will interrogate its logic using the simulation tools provided by `slimr`. Earlier on we talked about how the desert "turns green" after a big rainfall event. his implies it turns back to "brown" afterwards. Generally this is true, however, some patches remain relatively green during the dry periods. These are sometimes know as mesic 'refugia'. We hypothesized that during dry periods, our mouse population recede into these separate refugia across the landscape, where they become relatively reproductively isolated. This leads to an inexorable increase in Fst due to a drift without gene flow. Then, when the rain comes, the whole landscape becomes wet, the mice come out to play, spreading throughout, reproducing along the way. The subpopulations of the refugia intermix, leading to an erasure of the genemic differentiation that had been in progress during the dry years. But can this mechanism lead to the level of observed change in such a short period? Is there other possible mechanisms. Let's have an explore with simulation!
+
+
+## A simple simulation
+
+Now we want to setup a simple simulation that captures some of the features of the system we are studying. We will simulate three subpopulations, as we have in our data, and allow migration between them at equal rates. We will include, mutation, selection, sexual reproduction, and recombination as additional processes happening in our simulation. Our initial question is simply, can we observe Fst values that change through time in a manner consistent with our observed changes using combinations of just these processes? Thanks to `slimr`, we can continue and write out the logic of our proposed simulation directly in R, using syntax very similar to SLiM (>3.0). We can additionally make the simulation code easy to update with different parameter combinations to try out.
+
+We will use the following parameters in our simulation:
+
+Parameter          | Description
+------------------ | --------------------------
+mut_rate           | mutation rate of simulated population
+genome_size        | size of simulated genome
+selection_strength | mean strength of selection specified as a standard deviation of selection coeffs 
+migration_rates    | rate of migration amongst three pops when abundance is high, must be between 0 and 1
+abund_threshold    | abundance (before scaling) above which migration between populations is "turned" on
+recomb_rate        | recombination rate, a nuisance parameter
+popsize_scaling    | multiply observed abundances by this value to get total subpop size
+
+Now for the code:
+
+```{r sim}
+pop_sim <- slim_script(
+  
+  slim_block(initialize(), {
+    
+    initializeMutationRate(slimr_template("mut_rate", 1e-6));
+    initializeMutationType("m1", 0.5, "n", 0, slimr_template("selection_strength", 0.1));
+    initializeGenomicElementType("g1", m1, 1.0);
+    initializeGenomicElement(g1, 0, slimr_template("genome_size", 50000) - 1);
+    initializeRecombinationRate(slimr_template("recomb_rate", 1e-8));
+    initializeSex("A");
+    defineConstant("abund", slimr_inline(pop_abunds, delay = TRUE));
+    defineConstant("sample_these", slimr_inline(sample_these, delay = TRUE));
+    
+  }),
+  slim_block(1, {
+    
+    init_pop = slimr_inline(init_popsize, delay = TRUE)
+    
+    ## set populations to initial size
+    sim.addSubpop("p1", asInteger(init_pop[0]));
+    sim.addSubpop("p2", asInteger(init_pop[1]));
+    sim.addSubpop("p3", asInteger(init_pop[2]));
+    
+  }),
+  
+  slim_block(1, late(), {
+    ## get starting population from a file which we will fill-in later
+    sim.readFromPopulationFile(slimr_inline(starting_pop, delay = TRUE));
+    ## migration on or off flags for pops 1-3 (using tag)
+    p1.tag = 0;
+    p2.tag = 0;
+    p3.tag = 0;
+  }),
+  
+  slim_block(1, 1000, late(), {
+    
+    ## update generation number
+    gen = sim.generation %% 50
+    if(gen == 0) {
+      gen = 50
+    }
+    
+    ## set population size to observed levels
+    p1.setSubpopulationSize(asInteger(ceil(abund[0, gen - 1] * slimr_template("popsize_scaling", 1))));
+    p2.setSubpopulationSize(asInteger(ceil(abund[1, gen - 1] * ..popsize_scaling..)));
+    p3.setSubpopulationSize(asInteger(ceil(abund[2, gen - 1] * ..popsize_scaling..)));
+    
+    ## increase migration when above abundance threshold
+    if(p1.tag == 0 & abund[0, gen - 1] > slimr_template("abund_threshold", 5)) {
+      p2.setMigrationRates(p1, slimr_template("migration_rate", 0))
+      p3.setMigrationRates(p1, ..migration_rate..)
+      p1.tag = 1;
+    } 
+    if(p1.tag == 1 & abund[0, gen - 1] <= ..abund_threshold..) {
+      p2.setMigrationRates(p1, 0)
+      p3.setMigrationRates(p1, 0)
+      p1.tag = 0;
+    }
+    
+    if(p2.tag == 0 & abund[1, gen - 1] > ..abund_threshold..) {
+      p1.setMigrationRates(p2, ..migration_rate..)
+      p3.setMigrationRates(p2, ..migration_rate..)
+      p2.tag = 1;
+    } 
+    if(p2.tag == 1 & abund[1, gen - 1] <= ..abund_threshold..) {
+      p1.setMigrationRates(p2, 0)
+      p3.setMigrationRates(p2, 0)
+      p2.tag = 0;
+    }    
+    
+    if(p3.tag == 0 & abund[2, gen - 1] > ..abund_threshold..) {
+      p1.setMigrationRates(p3, ..migration_rate..)
+      p2.setMigrationRates(p3, ..migration_rate..)
+      p3.tag = 1;
+    } 
+    if(p3.tag == 1 & abund[2, gen - 1] <= ..abund_threshold..) {
+      p1.setMigrationRates(p3, 0)
+      p2.setMigrationRates(p3, 0)
+      p3.tag = 0;
+    }
+    
+  }),
+  
+  slim_block(1000, late(), {
+    slimr_output_full()
+  })
+  
+)
+
+pop_sim
+
+```
+
+The above script uses a number of different `slimr` feature that we will explain here. To anyone who has used SLiM before, the above script probably looks pretty familiar. For those of you not familiar with SLiM, we will go over each part of the above script one by one to gain an understanding of what the script is doing. Otherwise, if you'd like to know more about SLiM, I would highly recommend reading the SLiM manual, which is very detailed and packed full of examples. 
+
+Now, how do we fill in the templated variables with values and fill-in our `slimr_inline` calls with actual R objects? For that, we use the `slim_script_render` function. The first thing we need to do before we use it is to create the R objects that `slimr_inline` refers to, otherwise we will get an error about non-existent objects. So what do we need? We need a matrix of abundances for our three subpopulations (for `slimr_inline(pop_abunds)`), a matrix of starting population abundances (for `slimr_inline(init_popsize)`) and a file name pointing to a SLiM population data file containing initial population conditions (for `slimr_inline(starting_pop`). We will later create this file from our `genlight` object using `slimr`. But first, let's get our objects in order, choose some parameter values and render ourselves a `slimr_script`!
+
+For our population abundances over time, we will use the trap data, and we will create a simplified cycle, taking only part of the sequence, and then repeating it over and over throughout the years. We will sample data between 1995 and 2009, interpolate that to 50 time points, then loop over it inside our `slimr_script`, as we discussed above.
+
+```{r setup_robs}
+pop_abunds <- abund_summ %>%
+  filter(date < "2009-10-01" & date > "1995-03-01") %>%
+  mutate(three_pop = case_when(pop %in% c("MC", "SS", "WS") ~ "BR",
+                               pop %in% c("FRN", "FRS") ~ "BL",
+                               pop %in% c("KSE", "CS") ~ "TR")) %>%
+  drop_na(three_pop) %>%
+  group_by(date, three_pop) %>%
+  summarise(abund = mean(abund, na.rm = TRUE)) %>%
+  pivot_wider(names_from = date, values_from = abund) %>%
+  as.matrix()
+
+pop_abunds <- rbind(approx(pop_abunds[1, ], n = 50)$y,
+                    approx(pop_abunds[2, ], n = 50)$y,
+                    approx(pop_abunds[3, ], n = 50)$y)
+
+## replace exact zeroes
+pop_abunds[pop_abunds == 0] <- 0.02
+
+## set sample times corresponding to our genetic data (roughly)
+sample_times <- c("2006" = 40, "2007" = 45, "2008" = 49)
+
+## plot our abundance sequence
+
+plot(pop_abunds[2, ], type = "l", col = "blue")
+lines(pop_abunds[1, ], col = "red")
+lines(pop_abunds[3, ], col = "green")
+abline(v = sample_times)
+
+
+```
+
+So, that is out `pop_abunds`. For initial population states we are going to base it on data
+from 2008, which is the third sampling date, and which corresponds to what we think is a panmictic population, which is just after, but not during the big rainfall event. We will get the initial population sizes from here, as well as our starting population data. Our initial population sizes need to be based on this (rather than our abundance data we just generated above), because the number of individuals at the start of our simulation must match the number in the starting population data. The population will then be immediately adjusted to our desired population size by essentially drawing offspring from our smaller starting population pool. This should give us populations with SNP frequencies resembling our actual data at the start of the simulation.
+
+```{r start_pops}
+## extract 2008 data
+gen_2008 <- gen[gen@other$ind.metrics$year == 2008, ]
+## count number of individuals in genetic sample per subpopulation
+init_popsize <- c(table(pop(gen_2008)))
+## set filename to be used for starting pop data (using slim_file to make sure SLiM can find it)
+starting_pop = here("sims/starting_pop.txt") %>%
+  slim_file()
+```
+
+Okay, now we are ready to use `slim_script_render` to generate a script we can run. The first thing we can try is to render the script without providing a template. Since we have provided defaults for all of our templated variables, this should generate a script with the default values (our 'default' script).
+
+```{r gen_default_script}
+script_def <- slimr_script_render(pop_sim)
+
+script_def
+
+```
+Okay, so now we can see that we have an indication that our R objects will be inserted into the SLiM script. We can try and run this in SLiM now, but we will get an error:
+
+```{r run_error}
+
+test <- slim_run(script_def)
+
+```
+
+This is because the `starting_pop.txt` doesn't exist yet, and SLiM has thrown an error telling us this (which slimr passes from SLiM to us through the R console). Let's create the initial population file using `slim_make_pop_init`. We need to pass this function either a `genlight` or a SNP matrix. Since our `genlight` object has some missing values, and SLiM cannot handle missing values, we will first convert to a SNP matrix, and then fill-in missing values by interpolation. Essentially we just fill-in missing values randomly with a draw from a binomial distribution.
+
+```{r fill_missing}
+snp_mat <- as.matrix(gen_2008)
+
+glimpse(snp_mat)
+
+## replace NAs
+nas <- apply(snp_mat, 2, function(x) !any(!is.finite(x)))
+snp_mat[ , !nas] <- apply(snp_mat[ , !nas], 2, function(x) {
+  tab <- table(x[is.finite(x)]);
+  x[!is.finite(x)] <- as.integer(sample(names(tab), sum(!is.finite(x)), replace = TRUE, prob = tab / sum(tab)));
+  x
+})
+
+glimpse(snp_mat)
+```
+Okay, now  we make our starting population file!
+
+```{r make_pop_init}
+sexes <- as.character(gen_2008@other$ind.metrics$Sex)
+
+## sex ratio of sample is skewed, so replace actually sexes with perfectly even alternation
+## otherwise simulation crashes because it is unable to sample enough females 
+sexes[] <- c("M", "F")
+## now make initial population file
+slim_make_pop_input(snp_mat, here("sims/starting_pop.txt"), ## filename 
+                    sim_gen = 1, ## set generation to first generation
+                    ind_pops = gen_2008@other$ind.metrics$three_pop, ## use subpops
+                    ind_sex = sexes, ## set sexes
+                    mut_pos = sample.int(50000 - 1, nLoc(gen_2008)),   ## randomly assign snps
+                                                                       ## to genome positions
+                    mut_prev = apply(as.matrix(snp_mat), 2, sum)) ## set mutation prevalences
+
+## look at the first 50 line to see if it worked:
+read_lines(here("sims/starting_pop.txt")) %>%
+  head(50)
+```
+
+And now we can try running our simulation:
+
+```{r sim_run}
+res <- slim_run(script_def, capture_output = "|",)
+```

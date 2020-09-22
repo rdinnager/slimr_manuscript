@@ -234,7 +234,7 @@ lines(pop_abunds[3, ], col = "green")
 max_generations <- 1000
 
 ## first get data only from 2008 (panmictic low rainfall, year after big rainfall)
-## fill-in na values with a bernoulli draw with prob based based on non-missing data
+## fill-in na values with a multinomial draw with prob based based on non-missing data (cats are 0, 1, 2)
 gen_2008 <- gen[gen@other$ind.metrics$year == 2008, ]
 snp_mat <- as.matrix(gen_2008)
 #mostly_nas <- apply(snp_mat, 2, function(x) sum(is.finite(x)) < 2)
@@ -262,6 +262,20 @@ wsl_file <- init_pop
 init_popsize <- matrix(table(gen_2008@other$ind.metrics$three_pop), nrow = 1)
 
 pop_sim <- slim_script(
+  
+  slim_function("o<Subpopulation>$ subpop1", "o<Subpopulation>$ subpop2",
+                name = "calcFST",
+                return_type = "f$", body = {
+                  ## Calculate the FST between two subpopulations
+                  p1_p = sim.mutationFrequencies(subpop1);
+                  p2_p = sim.mutationFrequencies(subpop2);
+                  mean_p = (p1_p + p2_p) / 2.0;
+                  H_t = 2.0 * mean_p * (1.0 - mean_p);
+                  H_s = p1_p * (1.0 - p1_p) + p2_p * (1.0 - p2_p);
+                  fst = 1.0 - H_s/H_t;
+                  fst = fst[isFinite(fst)]; ## exclude muts where mean_p is 0.0 or 1.0
+                  return(mean(fst));
+                }),
   
   slim_block(initialize(), {
     
@@ -342,14 +356,14 @@ pop_sim <- slim_script(
     
     muts = sim.mutations[sim.mutationCounts(NULL) > 1]
     
-    slimr_output(asInteger(ceil(abund[ , gen - 1] * ..popsize_scaling..)), "abunds")
+   
+    ## output data to visualise
+    slimr_output(c(calcFST(p1, p2), calcFST(p1, p3), calcFST(p2, p3)), "fsts");
     slimr_output(sim.subpopulations.individualCount, "vis_data_N");
     slimr_output(sapply(sim.subpopulations, "sim.mutationFrequencies(applyValue, muts);"), "vis_data_freq");
     slimr_output(muts.mutationType, "vis_data_types");
     slimr_output(muts.position, "vis_data_pos");
     slimr_output(muts.selectionCoeff, "vis_data_sel")
-    # slimr_output(sim.outputFull(), "pop_sample", do_every = 2, send_to = "file",
-    #              file_name = "D://temp_data/sims_1.csv.gz", format = "csv");
     
   })
   
@@ -411,9 +425,16 @@ extract_vis_data <- function(out_dat) {
     dplyr::left_join(pos_dat, by = "index") %>%
     dplyr::left_join(sel_dat, by = "index")
   
+  fst_dat <- out_dat %>%
+    dplyr::filter(name == "fsts")
+  
+  abund_dat
+  
   
 }
 
+test_fst <- out_dat %>%
+  dplyr::filter(name == "fsts")
 
 dat <- extract_vis_data(test_run$output_data)
 

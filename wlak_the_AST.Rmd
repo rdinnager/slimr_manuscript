@@ -130,3 +130,49 @@ test2 <- rlang::exprs(!!!test)
 
 ```
 
+
+```{r recurse}
+expr_type <- function(x) {
+  if (rlang::is_syntactic_literal(x)) {
+    "constant"
+  } else if (is.symbol(x)) {
+    "symbol"
+  } else if (is.call(x)) {
+    "call"
+  } else if (is.pairlist(x)) {
+    "pairlist"
+  } else {
+    typeof(x)
+  }
+}
+
+switch_expr <- function(x, ...) {
+  switch(expr_type(x),
+    ...,
+    stop("Don't know how to handle type ", typeof(x), call. = FALSE)
+  )
+}
+
+eval_calls <- function(x) {
+  print(expr_type(x))
+  print(x)
+  switch_expr(x,
+    # Base cases
+    symbol = ,
+    constant = x,
+
+    # evaluate cases
+    call = ,
+    pairlist = rlang::eval_tidy(x)
+  )
+}
+
+test <- purrr::map(test_expr,
+            eval_calls)
+test2 <- rlang::exprs(!!!test)
+
+test
+test2
+
+```
+
