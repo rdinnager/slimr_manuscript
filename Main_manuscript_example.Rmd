@@ -1,17 +1,37 @@
 ---
-title: "Using slimr to investigate small mammal population genetics in a periodic environment"
+title: "Using slimr to investigate the population genetics of the Sandy Inland Mouse in the periodic rainfall environment of the Simpson Desert"
 author: "Russell Dinnage"
-date: "18/09/2020"
-output: word_document
+date: "21/10/2020"
+output:
+  html_document:
+    df_print: paged
+  word_document: default
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE,
+                      fig.width = 7,
+                      fig.height = 6,
+                      out.width = "80%")
+if(file.exists("/mnt/d/Projects/slimr_manuscript/sims/starting_pop.txt")) {
+  file.remove("/mnt/d/Projects/slimr_manuscript/sims/starting_pop.txt")
+}
+```
+
+```{r color, echo = FALSE, results='asis'}
+# crayon needs to be explicitly activated in Rmd
+options(crayon.enabled = TRUE)
+# Hooks needs to be set to deal with outputs
+# thanks to fansi logic
+if(requireNamespace("fansi", quietly = TRUE)) {
+  old_hooks <- fansi::set_knit_hooks(knitr::knit_hooks, 
+                                     which = c("output", "message", "error"))
+}
 ```
 
 ## A look at the data
 
-An ongoing project in the Simpson Desert of central Australia is producing genomic sequence data for small mammals and reptiles collected over more than 30 years. We have some preliminary data from this project for the Sandy Inland Mouse (*Pseudomys hermannsburgensis*) that we'd like to use to explore, through data analysis and simulation, and hopefully gain some insight into where this project might ultimately take us. First let's load all the packages we use in the example, and then load the genetic data we will be working with. The data is stored in an `.Rdata` file containing a `genlight` object, which stores binary SNP data, defined in the `adegenet` package. We also have demographic data in the form of trap capture data.
+An ongoing project in the Simpson Desert of central Australia is producing genomic sequence data for small mammals and reptiles collected over more than 30 years. We have some preliminary data from this project for the Sandy Inland Mouse (*Pseudomys hermannsburgensis*) that we'd like to use to explore, through data analysis and simulation, and hopefully gain some insight into where this project might ultimately take us. First let's load all the packages we use in the example, and then load the genetic data we will be working with. The data is stored in an `.Rdata` file containing a `genlight` object, which stores binary Single Nucleotide Polymorphism (SNP) data, defined in the `adegenet` package. We also have demographic data in the form of trap capture data (captures per 100 trap nights; see [Dickman et al. 2014]() *I'm not sure which paper this is* and [Greenville et al. 2016](https://esajournals.onlinelibrary.wiley.com/doi/full/10.1002/ecs2.1343) for capture methods).
 
 ```{r setup_data}
 library(readr)
@@ -25,12 +45,15 @@ library(future)
 library(furrr)
 library(lubridate)
 library(ggplot2)
+library(ggforce)
+library(gganimate)
 library(directlabels)
 library(patchwork)
 library(sf)
 library(adegenet)
 library(dartR)
 library(here)
+library(stringr)
 library(slimr)
 
 ## because filter function exists in multiple packages we use
@@ -48,7 +71,7 @@ abund
 
 ```
 
-So we have SNP sequences from 167 individuals taken over three years and several different sites. Before we take a look at the genetic data, let's set the environmental context a bit. These small mammals live in the Simpson Desert, an arid ecosystem characterized by long periods of little rain, with occasional major rainfall events. These tend to occur every 6-10 years or so. After rainfall events, the desert turns green, it can be seen from space, and our analysis of satellite relectance data confirms massive spikes in productivity after these rainfalls. Plants grow, flower and seed massively during these periods, and so food is abundant for small mammals. We can see the regular pulse of rainfall just by looking at the mammal abundances -- *Pseudomys hermannsburgensis* in particular responds quickly to rainfall. Let's look at our trap data to see this pattern.
+So we have SNP sequences from 167 individuals taken over three years and several different sites. Before we take a look at the genetic data, let's set the environmental context a bit. These small mammals live in the Simpson Desert, an arid ecosystem characterized by long periods of little rain, with occasional major rainfall events. These tend to occur every 6-10 years. After rainfall events, the desert turns green, it can be seen from space, and our analysis of satellite reflectance data confirms massive spikes in productivity after these rainfalls. Plants grow, flower and seed massively during these periods, and so food is abundant for small mammals. We can see the regular pulse of rainfall just by looking at the mammal abundances -- *Pseudomys hermannsburgensis* in particular responds quickly to rainfall. Let's look at our live trapping data on abundances to see this pattern.
 
 ```{r analyse_traps}
 ## give more descriptive names to sites
@@ -119,7 +142,7 @@ mapview(coords, label = coords$pop, map.types = "Esri.WorldImagery")
 
 Looks like our sites cluster into roughly 3 spatial groups. For simplicity we can merge these sites into 3 subpopulations, which will make it a bit simpler for our simulation later. 
 
-```{r merge_pops}
+```{r merge_pops, fig.cap="This is an interactive map in the html version", fig.height=8, fig.width=8}
 coords_3 <- gen_meta %>%
   mutate(three_pop = case_when(pop %in% c("MC", "SS", "WS") ~ "BR",
                                pop %in% c("FRN", "FRS") ~ "BL",
@@ -135,7 +158,7 @@ mapview(coords_3, label = coords_3$three_pop, map.types = "Esri.WorldImagery")
 
 As it happens these merged subpopulations are roughly equidistant, arranged in a triangle. If we assume the terrain between them is similarly easy to traverse we can simplify our model of the system even more and assume that all else being equal these subpopulations should have roughly similar migration rates between them. We called these subpopulations "BR", "BL", and "TR", for Bottom Right, Bottom Left, and Top Right (creatively named I know). 
 
-Given this setup, let us have a look at the Fst values between these three subpopulations over the three years. We will use the `dartR` package, which is package designed to work with data produced using the DArT method, to calculate pairwise Fst for our subpopulations.
+Given this setup, let us have a look at the Fst values between these three subpopulations over the three years. We will use the `dartR` package, which is a package designed to work with SNP data, to calculate pairwise Fst for our subpopulations.
 
 ```{r calc_fst}
 
@@ -156,7 +179,7 @@ fst <- gl.fst.pop(gen, nboots = 1L)
 fst
 ```
 
-That is the overall Fst, but we really want to know how that is changing over our three sampling time points. We have three years of data, which happen to span a major rain event, from 2006, 2007, and 2008, where there was a major rain event in 2007. Let's look at the pairwise Fst over the three years.
+That is the overall Fst, but we really want to know how that is changing over our three sampling time points. We have three years of data, which happen to span a major rainfall event, from 2006, 2007, and 2008, where there was a major rainfall event in 2007. Let's look at the pairwise Fst over the three years.
 
 ```{r three_years_fst}
 fst_by_year <- map(c(2006, 2007, 2008),
@@ -184,12 +207,12 @@ ggplot(fst_df, aes(year, fst)) +
   geom_path(aes(colour = pop_combo, group = pop_combo)) +
   theme_minimal()
 ```
-So we see that during the rainfall year a precipitous drop in Fst occurs, which remains quite low the following year. Now, can we think of a reason why this pattern might occur? We have a hypothesis! First, we'll lay it out, then we will interrogate its logic using the simulation tools provided by `slimr`. Earlier on we talked about how the desert "turns green" after a big rainfall event. his implies it turns back to "brown" afterwards. Generally this is true, however, some patches remain relatively green during the dry periods. These are sometimes know as mesic 'refugia'. We hypothesized that during dry periods, our mouse population recede into these separate refugia across the landscape, where they become relatively reproductively isolated. This leads to an inexorable increase in Fst due to a drift without gene flow. Then, when the rain comes, the whole landscape becomes wet, the mice come out to play, spreading throughout, reproducing along the way. The subpopulations of the refugia intermix, leading to an erasure of the genemic differentiation that had been in progress during the dry years. But can this mechanism lead to the level of observed change in such a short period? Is there other possible mechanisms. Let's have an explore with simulation!
+So we see that during the rainfall year a precipitous drop in Fst occurs, which remains quite low the following year. Now, can we think of a reason why this pattern might occur? We have a hypothesis! First, we'll lay it out, then we will interrogate its logic using the simulation tools provided by `slimr`. Earlier on we talked about how the desert "turns green" after a big rainfall event. This implies it reverts back to dry or "red" sands afterwards. Generally this is true, however, some patches remain relatively green during the dry periods. These are sometimes know as mesic 'refugia'. We hypothesized that during dry periods, our mouse population recedes into these separate refugia across the landscape, where they become relatively reproductively isolated. This leads to an inexorable increase in Fst due to a genetic drift without gene flow. Then, when the rain comes, the whole landscape becomes wet, the mice come out to play, spreading throughout, reproducing along the way. The subpopulations of the refugia intermix, leading to an erasure of the genomic differentiation that had been in progress during the dry years. But can this mechanism lead to the level of observed change in such a short period? Are there other possible mechanisms? Let's explore these ideas with simulation!
 
 
 ## A simple simulation
 
-Now we want to setup a simple simulation that captures some of the features of the system we are studying. We will simulate three subpopulations, as we have in our data, and allow migration between them at equal rates. We will include, mutation, selection, sexual reproduction, and recombination as additional processes happening in our simulation. Our initial question is simply, can we observe Fst values that change through time in a manner consistent with our observed changes using combinations of just these processes? Thanks to `slimr`, we can continue and write out the logic of our proposed simulation directly in R, using syntax very similar to SLiM (>3.0). We can additionally make the simulation code easy to update with different parameter combinations to try out.
+To begin setup a simple simulation that captures some of the features of the system we are studying. We will simulate three subpopulations, as we have in our data, and allow migration between them at equal rates. We will include evolutionary processes such as mutation, selection, sexual reproduction, and recombination as additional processes happening in our simulation. Our initial question is simply, can we observe Fst values that change through time in a manner consistent with our observed changes using combinations of just these processes? Thanks to `slimr`, we can continue and write out the logic of our proposed simulation directly in R, using syntax very similar to SLiM (>3.0). We can additionally make the simulation code easy to update with different parameter combinations to try out.
 
 We will use the following parameters in our simulation:
 
@@ -249,7 +272,7 @@ pop_sim <- slim_script(
     }
     
     ## set population size to observed levels
-    p1.setSubpopulationSize(asInteger(ceil(abund[0, gen - 1] * slimr_template("popsize_scaling", 1))));
+    p1.setSubpopulationSize(asInteger(ceil(abund[0, gen - 1] * slimr_template("popsize_scaling", 100))));
     p2.setSubpopulationSize(asInteger(ceil(abund[1, gen - 1] * ..popsize_scaling..)));
     p3.setSubpopulationSize(asInteger(ceil(abund[2, gen - 1] * ..popsize_scaling..)));
     
@@ -303,7 +326,7 @@ The above script uses a number of different `slimr` feature that we will explain
 
 Now, how do we fill in the templated variables with values and fill-in our `slimr_inline` calls with actual R objects? For that, we use the `slim_script_render` function. The first thing we need to do before we use it is to create the R objects that `slimr_inline` refers to, otherwise we will get an error about non-existent objects. So what do we need? We need a matrix of abundances for our three subpopulations (for `slimr_inline(pop_abunds)`), a matrix of starting population abundances (for `slimr_inline(init_popsize)`) and a file name pointing to a SLiM population data file containing initial population conditions (for `slimr_inline(starting_pop`). We will later create this file from our `genlight` object using `slimr`. But first, let's get our objects in order, choose some parameter values and render ourselves a `slimr_script`!
 
-For our population abundances over time, we will use the trap data, and we will create a simplified cycle, taking only part of the sequence, and then repeating it over and over throughout the years. We will sample data between 1995 and 2009, interpolate that to 50 time points, then loop over it inside our `slimr_script`, as we discussed above.
+For our population abundances over time, we will use the live-trapping data, and we will create a simplified cycle, taking only part of the sequence, and then repeating it over and over throughout the years. We will sample data between 1995 and 2009, interpolate that to 50 time points, then loop over it inside our `slimr_script`, as we discussed above.
 
 ```{r setup_robs}
 pop_abunds <- abund_summ %>%
@@ -348,6 +371,11 @@ init_popsize <- c(table(pop(gen_2008)))
 ## set filename to be used for starting pop data (using slim_file to make sure SLiM can find it)
 starting_pop = here("sims/starting_pop.txt") %>%
   slim_file()
+## setup generations to sample
+## we will just sample the three years corresponding to the data, but do it during the last three cycles, as "technical" replicates
+sample_these <- purrr::map(c(17:19),
+                           ~50*.x + sample_times) %>%
+  purrr::reduce(union)
 ```
 
 Okay, now we are ready to use `slim_script_render` to generate a script we can run. The first thing we can try is to render the script without providing a template. Since we have provided defaults for all of our templated variables, this should generate a script with the default values (our 'default' script).
@@ -388,9 +416,12 @@ Okay, now  we make our starting population file!
 ```{r make_pop_init}
 sexes <- as.character(gen_2008@other$ind.metrics$Sex)
 
-## sex ratio of sample is skewed, so replace actually sexes with perfectly even alternation
-## otherwise simulation crashes because it is unable to sample enough females 
-sexes[] <- c("M", "F")
+## sex ratio of sample is skewed to female, so replace actually sexes with extra males
+## otherwise simulation crashes because it is unable to sample enough females? Need
+## to look more into this bug.
+sexes[pop(gen_2008) == "BL"] <- c("M", "F")
+sexes[pop(gen_2008) == "BR"] <- c("M", "F")
+sexes[pop(gen_2008) == "TR"] <- c("M", "F")
 ## now make initial population file
 slim_make_pop_input(snp_mat, here("sims/starting_pop.txt"), ## filename 
                     sim_gen = 1, ## set generation to first generation
@@ -408,5 +439,428 @@ read_lines(here("sims/starting_pop.txt")) %>%
 And now we can try running our simulation:
 
 ```{r sim_run}
-res <- slim_run(script_def, capture_output = "|",)
+res <- slim_run(script_def)
+```
+
+Okay, so now we have a working simulation! We've currently just output the full population information at the end of the simulation, which doesn't give us too much information about our question, but just to convince ourselves the simulation produced genetic information, we can extract our output as a `genlight` object and plot it. *Note*: The conversion can take awhile.
+
+```{r plot_genlight}
+pop_res <- slimr::slim_output_genlight(res, "full_output")
+## reorder by subpop
+pop_res <- pop_res[order(pop(pop_res)), ]
+plot(pop_res)
+```
+So this shows that our three populations are characterized by mostly non-overlapping fixed mutations. This makes sense since our default parameters specified some selection, and no migration. Mutation with positive selection coefficients would have sweeped to fixation, and the lack of migration between subpopulation means that each subpopulation is likely to have had a different set of mutations go to fixation, and no way for these to then spread to other subpopulations.
+
+Okay, to get an idea of what sort of dynamics of Fst we will get with different versions of this simulation, let's create a version where we calculate Fst during the simulation, and output it for tracking. Then we can make some time-series plots. When it comes to comparing simulation outputs to our actual data we will make yet another version where we will only output just before, during, and just after the population explosions corresponding to rainfall. To add a Fst calculation to our simulation we will use the `slim_function` function, which allows you to specify a SLiM function to use in your SLiM code. This Fst function is based on the one described in the SLiM manual, and can also be found online here: [https://github.com/MesserLab/SLiM-Extras/blob/master/functions/calcFST.txt](https://github.com/MesserLab/SLiM-Extras/blob/master/functions/calcFST.txt).
+
+```{r track_version}
+pop_sim <- slim_script(
+  
+  slim_function("o<Subpopulation>$ subpop1", "o<Subpopulation>$ subpop2",
+                name = "calcFST",
+                return_type = "f$", body = {
+                  ## Calculate the FST between two subpopulations
+                  p1_p = sim.mutationFrequencies(subpop1);
+                  p2_p = sim.mutationFrequencies(subpop2);
+                  mean_p = (p1_p + p2_p) / 2.0;
+                  H_t = 2.0 * mean_p * (1.0 - mean_p);
+                  H_s = p1_p * (1.0 - p1_p) + p2_p * (1.0 - p2_p);
+                  fst = 1.0 - H_s/H_t;
+                  fst = fst[isFinite(fst)]; ## exclude muts where mean_p is 0.0 or 1.0
+                  return(mean(fst));
+                }),
+  
+  slim_block(initialize(), {
+    
+    initializeMutationRate(slimr_template("mut_rate", 1e-6));
+    initializeMutationType("m1", 0.5, "n", 0, slimr_template("selection_strength", 0.1));
+    initializeGenomicElementType("g1", m1, 1.0);
+    initializeGenomicElement(g1, 0, slimr_template("genome_size", 50000) - 1);
+    initializeRecombinationRate(slimr_template("recomb_rate", 1e-8));
+    initializeSex("A");
+    defineConstant("abund", slimr_inline(pop_abunds, delay = TRUE));
+    defineConstant("sample_these", slimr_inline(sample_these, delay = TRUE));
+    
+  }),
+  slim_block(1, {
+    
+    init_pop = slimr_inline(init_popsize, delay = TRUE)
+    
+    ## set populations to initial size
+    sim.addSubpop("p1", asInteger(init_pop[0]));
+    sim.addSubpop("p2", asInteger(init_pop[1]));
+    sim.addSubpop("p3", asInteger(init_pop[2]));
+    
+  }),
+  
+  slim_block(1, late(), {
+    ## get starting population from a file which we will fill-in later
+    sim.readFromPopulationFile(slimr_inline(starting_pop, delay = TRUE));
+    ## migration on or off flags for pops 1-3 (using tag)
+    p1.tag = 0;
+    p2.tag = 0;
+    p3.tag = 0;
+  }),
+  
+  slim_block(1, 1000, late(), {
+    
+    ## update generation number
+    gen = sim.generation %% 50
+    if(gen == 0) {
+      gen = 50
+    }
+    
+    ## set population size to observed levels
+    p1.setSubpopulationSize(asInteger(ceil(abund[0, gen - 1] * slimr_template("popsize_scaling", 100))));
+    p2.setSubpopulationSize(asInteger(ceil(abund[1, gen - 1] * ..popsize_scaling..)));
+    p3.setSubpopulationSize(asInteger(ceil(abund[2, gen - 1] * ..popsize_scaling..)));
+    
+    ## increase migration when above abundance threshold
+    if(p1.tag == 0 & abund[0, gen - 1] > slimr_template("abund_threshold", 5)) {
+      p2.setMigrationRates(p1, slimr_template("migration_rate", 0))
+      p3.setMigrationRates(p1, ..migration_rate..)
+      p1.tag = 1;
+    } 
+    if(p1.tag == 1 & abund[0, gen - 1] <= ..abund_threshold..) {
+      p2.setMigrationRates(p1, 0)
+      p3.setMigrationRates(p1, 0)
+      p1.tag = 0;
+    }
+    
+    if(p2.tag == 0 & abund[1, gen - 1] > ..abund_threshold..) {
+      p1.setMigrationRates(p2, ..migration_rate..)
+      p3.setMigrationRates(p2, ..migration_rate..)
+      p2.tag = 1;
+    } 
+    if(p2.tag == 1 & abund[1, gen - 1] <= ..abund_threshold..) {
+      p1.setMigrationRates(p2, 0)
+      p3.setMigrationRates(p2, 0)
+      p2.tag = 0;
+    }    
+    
+    if(p3.tag == 0 & abund[2, gen - 1] > ..abund_threshold..) {
+      p1.setMigrationRates(p3, ..migration_rate..)
+      p2.setMigrationRates(p3, ..migration_rate..)
+      p3.tag = 1;
+    } 
+    if(p3.tag == 1 & abund[2, gen - 1] <= ..abund_threshold..) {
+      p1.setMigrationRates(p3, 0)
+      p2.setMigrationRates(p3, 0)
+      p3.tag = 0;
+    }
+    
+    ## output Fst
+    slimr_output(c(calcFST(p1, p2), calcFST(p1, p3), calcFST(p2, p3)), "fsts");
+    
+  }),
+  
+  slim_block(1000, late(), {
+    sim.simulationFinished()
+  })
+  
+) -> pop_sim_fst
+
+
+```
+
+Now let's run that for our defaults to see how it works.
+
+```{r run_sim_fst}
+
+fst_script <- slimr_script_render(pop_sim_fst)
+
+fst_res <- slim_run(fst_script)
+
+```
+
+So now we can have a look at how the Fst data was returned, which is the default way `slimr` returns data that is a vector:
+
+```{r show_res}
+fst_res$output_data
+typeof(fst_res$output_data$data)
+```
+
+So it is currently in the form of a character vector separated by spaces. This is pretty straightforward to extract, so let's do it (*Note*: `slimr` has the ability to automatically convert this output to more user friendly form, but here we will do it the hard way to show how you can flexibly extract different kinds of data, even if a built-in `slimr` function doesn't exist to handle the type of output you want).
+
+```{r process_fst}
+extract_fst <- function(fst_res) {
+  fst_dat <- fst_res$output_data %>%
+        dplyr::select(generation, data) %>%
+        dplyr::mutate(data = str_split(data, " ")) %>%
+        tidyr::unnest_longer(data, values_to = "fst", indices_to = "index") %>%
+        dplyr::mutate(fst = as.numeric(fst), `subpop\npair` = c("BL-BR", "BL-TR", "BR-TR")[index]) 
+  fst_dat
+}
+
+fst_dat <- extract_fst(fst_res)
+
+ggplot(fst_dat, aes(generation, fst)) +
+  geom_path(aes(colour = `subpop\npair`)) +
+  scale_y_sqrt() +
+  ggforce::facet_zoom(x = generation > 750 & generation < 1000,
+                      y = fst > 0.65,
+                      horizontal = FALSE,
+                      zoom.size = 1)
+```
+
+We can see that pairwise Fst rapidly increases between all three subpopulations, reaching nearly its theoretical maximum of 1.0, and then periodically dipping slightly. Let's look at how this equilibrium pattern corresponds with population sizes. We will look at mean population size and mean Fst.
+
+```{r compare_popsize_fst}
+pop_mean <- apply(pop_abunds, 2, mean) %>%
+  rep(length.out = n_distinct(fst_dat$generation)) * 100 ## don't forget popsize_scaling
+
+plot_cycle <- function(fst_dat, pop_mean) {
+  fst_pop <- fst_dat %>%
+    dplyr::group_by(generation) %>%
+    dplyr::summarise(fst = mean(fst)) %>%
+    dplyr::mutate(popsize = pop_mean) %>%
+    dplyr::filter(generation > 750) ## only take data after equilibrium reached
+  
+  ggplot(fst_pop, aes(popsize, fst)) +
+    geom_path(aes(colour = generation), 
+              arrow = arrow(length = unit(0.15, "cm"), type = "closed"), 
+              alpha = 0.5) +
+    annotate("point", x = fst_pop$popsize[1], fst_pop$fst[1], colour = "red", size = 2) +
+    scale_x_log10() +
+    scale_colour_viridis_c() +
+    theme_minimal()
+}
+
+plot_cycle(fst_dat, pop_mean)
+
+```
+
+The plot above shows how Fst and population size are changing through time together for 250 generations (the red dot is the starting point at generation 750). It appears that as population size begins increasing the Fst begins to drop slightly. This drop in Fst continues even as population size begins to decrease again (a lag effect?), then Fst suddenly increases back to nearly 1.0 as population size reaches a low. I suspect this pattern is due to ephemeral effects of increased efficiency of selection when population size is high. As new mutations begin sweeping to fixation there is an intermediate period where they are at intermediate frequency -- this has the tendency to lead to reductions in within-population heterozygosity (relative to total heterozygosity), and leads to the subpopulation becoming slightly more similar due to chance collisions between genes being selected in both populations.
+
+Due to overplotting however, some of the details of the plot may be difficult to see. Instead let's use `gganimate` to create an animated version that might show the dynamics a bit better.
+
+```{r animate_it}
+animate_cycle <- function(fst_dat, pop_mean) {
+  fst_pop <- fst_dat %>%
+    dplyr::group_by(generation) %>%
+    dplyr::summarise(fst = mean(fst)) %>%
+    dplyr::mutate(popsize = pop_mean) %>%
+    dplyr::filter(generation > 250) 
+  
+  anim <- ggplot(fst_pop, aes(popsize, fst)) +
+    geom_point() +
+    scale_x_log10() +
+    transition_reveal(generation) +
+    shadow_wake(0.02, falloff = "sine-in") +
+    ggtitle("Generation: {frame_along}") +
+    theme_minimal()
+  
+  animate(anim, nframes = n_distinct(fst_pop$generation) * 5, fps = 30, 
+          start_pause = 10, end_pause = 10, renderer = gifski_renderer())
+}
+
+animate_cycle(fst_dat, pop_mean)
+
+
+```
+
+The above animation shows 750 generations of the dynamics, with the black dot showing the position of the population in terms of the mean population size, and the mean pairwise Fst, at different time points. We can clearly see the cycles occurring and its direction.
+
+In any event, this is obviously a pretty unrealistic scenario, and it bears little resemblance to what is happening in our actual data. So, let us try a few other sets of parameters, and see if we can get something closer to what we observe in our data. Now we can finally see how we specify non-default values to our templated variables using `slimr_script_render`. Let's start by changing the `migration_rate` parameter, which controls how much migration we get between subpopulations when they go over their threshold population size. Let's set it to maximum migration (0.5) -- this model is similar to our hypothesis for the pattern we see. We will also set selection to practically zero, so we can isolate drift as a mechanism. We set a parameter value in our script like this:
+
+```{r try_more_params}
+## set migration rate to 0.5 (maximum migration, e.g. 50% of population switches place)
+## population will become panmictic over a certain popsize threshold
+fst_script_2 <- slimr_script_render(pop_sim_fst, template = list(migration_rate = 0.5,
+                                                                 selection_strength = 1e-12))
+
+## now run the sim and show plots of results
+fst_res_2 <- slim_run(fst_script_2)
+fst_dat_2 <- extract_fst(fst_res_2)
+
+ggplot(fst_dat_2, aes(generation, fst)) +
+  geom_path(aes(colour = `subpop\npair`)) +
+  scale_y_sqrt() +
+  ggforce::facet_zoom(x = generation > 750 & generation < 1000,
+                      y = fst < 0.5,
+                      horizontal = FALSE,
+                      zoom.size = 1)
+
+plot_cycle(fst_dat_2, pop_mean)
+animate_cycle(fst_dat_2, pop_mean)
+
+```
+
+This shows a very distinct pattern relative to our last run. Now we see that Fst tends to be very low, particularly when population sizes are high (e.g. when migration is "turned on"), as expected. Fst increases in the intervening periods of low population size, which can only be explained by drift. Our Fst values are closer to the magnitude of values we see in our data, which max out at around 0.05, though they still tend to be much higher in this simulation overall.
+
+Let's try one more scenario before we attempt to more formally compare the simulations to our data.
+Let's set our `abund_threshold` controlling at what population size the subpopulation begins exchanging individuals to zero. This means that migration will be on all the time. We will also increase selection.
+
+```{r mig_always}
+fst_script_3 <- slimr_script_render(pop_sim_fst, template = list(migration_rate = 0.5,
+                                                                 selection_strength = 0.2,
+                                                                 abund_threshold = 0))
+
+fst_res_3 <- slim_run(fst_script_3)
+fst_dat_3 <- extract_fst(fst_res_3)
+
+ggplot(fst_dat_3, aes(generation, fst)) +
+  geom_path(aes(colour = `subpop\npair`)) +
+  scale_y_sqrt() +
+  ggforce::facet_zoom(x = generation > 750 & generation < 1000,
+                      y = fst < 0.2,
+                      horizontal = FALSE,
+                      zoom.size = 1)
+
+plot_cycle(fst_dat_3, pop_mean)
+animate_cycle(fst_dat_3, pop_mean)
+```
+
+We can again see that we get rapid fluctuations in Fst relating to changes in population size. Here they are a bit more rapid but don't reach the same extremes of Fst. The fluctuations presumably still occur because at very low population size, drift still allows the subpopulations to drift apart due to chance alone, even though they are panmictic (in other words, if you choose any two random subsets of individuals you would expect a higher pairwise Fst during times of low population size). Before we move on, what happens if we reduce the migration rate with an abundance threshold:
+
+```{r sel_migr_on}
+fst_script_4 <- slimr_script_render(pop_sim_fst, template = list(migration_rate = 0.2,
+                                                                 selection_strength = 1e-12,
+                                                                 abund_threshold = 5))
+
+fst_res_4 <- slim_run(fst_script_4)
+fst_dat_4 <- extract_fst(fst_res_4)
+
+ggplot(fst_dat_4, aes(generation, fst)) +
+  geom_path(aes(colour = `subpop\npair`)) +
+  scale_y_sqrt() +
+  ggforce::facet_zoom(x = generation > 750 & generation < 1000,
+                      y = fst < 0.2,
+                      horizontal = FALSE,
+                      zoom.size = 1)
+
+plot_cycle(fst_dat_4, pop_mean)
+animate_cycle(fst_dat_4, pop_mean)
+
+```
+Again we see those fluctuations. All in all, this suggests that it is likely to be difficult to distinguish what processes are driving the pattern of Fst we see in our study. There clearly are some differences in the details of the dynamics, particularly when you compare our cycle plots between the different scenarios. However, we only have three years of data, just spanning a rainfall (or population explosion) event, which means considerably less information to go on. It looks like it is going to be difficult to disentangle the effects of migration from just the effects of population size, which is perhaps not surprising, given that these two factors are linked in our model (e.g. our hypothesis is that migration increases with high rainfall, which also is linked with population increases). Unfortunately the two processes have a similar effect on Fst, migration creates gene flow which reduces population differentiation, but increasing population increases effective population size, and thus reducing the strength of drift relative to selection, me
+
+So the next thing we should do is get our simulation to output data we can compare directly to our data. In this case we will just output full population information at several time points, and calculate Fst post-hoc using `dartR` so that our methods of calculating Fst are the same. We will also sample the subpopulations in our simulation to try and match sample size with our real data as well.
+
+```{r add_sampling}
+
+pop_sim <- slim_script(
+  
+  slim_block(initialize(), {
+    
+    initializeSLiMOptions(keepPedigrees=T);
+    initializeMutationRate(slimr_template("mut_rate", 1e-6));
+    initializeMutationType("m1", 0.5, "n", 0, slimr_template("selection_strength", 0.1));
+    initializeGenomicElementType("g1", m1, 1.0);
+    initializeGenomicElement(g1, 0, slimr_template("genome_size", 50000) - 1);
+    initializeRecombinationRate(slimr_template("recomb_rate", 1e-8));
+    initializeSex("A");
+    defineConstant("abund", slimr_inline(pop_abunds, delay = TRUE));
+    defineConstant("sample_these", slimr_inline(sample_these, delay = TRUE));
+    
+  }),
+  slim_block(1, {
+    
+    init_pop = slimr_inline(init_popsize, delay = TRUE)
+    
+    ## set populations to initial size
+    sim.addSubpop("p1", asInteger(init_pop[0]));
+    sim.addSubpop("p2", asInteger(init_pop[1]));
+    sim.addSubpop("p3", asInteger(init_pop[2]));
+    
+  }),
+  
+  slim_block(1, late(), {
+    ## get starting population from a file which we will fill-in later
+    sim.readFromPopulationFile(slimr_inline(starting_pop, delay = TRUE));
+    ## migration on or off flags for pops 1-3 (using tag)
+    p1.tag = 0;
+    p2.tag = 0;
+    p3.tag = 0;
+  }),
+  
+  slim_block(1, 1000, late(), {
+    
+    ## update generation number
+    gen = sim.generation %% 50
+    if(gen == 0) {
+      gen = 50
+    }
+    
+    ## set population size to observed levels
+    p1.setSubpopulationSize(asInteger(ceil(abund[0, gen - 1] * slimr_template("popsize_scaling", 100))));
+    p2.setSubpopulationSize(asInteger(ceil(abund[1, gen - 1] * ..popsize_scaling..)));
+    p3.setSubpopulationSize(asInteger(ceil(abund[2, gen - 1] * ..popsize_scaling..)));
+    
+    ## increase migration when above abundance threshold
+    if(p1.tag == 0 & abund[0, gen - 1] > slimr_template("abund_threshold", 5)) {
+      p2.setMigrationRates(p1, slimr_template("migration_rate", 0))
+      p3.setMigrationRates(p1, ..migration_rate..)
+      p1.tag = 1;
+    } 
+    if(p1.tag == 1 & abund[0, gen - 1] <= ..abund_threshold..) {
+      p2.setMigrationRates(p1, 0)
+      p3.setMigrationRates(p1, 0)
+      p1.tag = 0;
+    }
+    
+    if(p2.tag == 0 & abund[1, gen - 1] > ..abund_threshold..) {
+      p1.setMigrationRates(p2, ..migration_rate..)
+      p3.setMigrationRates(p2, ..migration_rate..)
+      p2.tag = 1;
+    } 
+    if(p2.tag == 1 & abund[1, gen - 1] <= ..abund_threshold..) {
+      p1.setMigrationRates(p2, 0)
+      p3.setMigrationRates(p2, 0)
+      p2.tag = 0;
+    }    
+    
+    if(p3.tag == 0 & abund[2, gen - 1] > ..abund_threshold..) {
+      p1.setMigrationRates(p3, ..migration_rate..)
+      p2.setMigrationRates(p3, ..migration_rate..)
+      p3.tag = 1;
+    } 
+    if(p3.tag == 1 & abund[2, gen - 1] <= ..abund_threshold..) {
+      p1.setMigrationRates(p3, 0)
+      p2.setMigrationRates(p3, 0)
+      p3.tag = 0;
+    }
+    
+    if(any(match(sample_these, sim.generation) >= 0)) {
+      ind_sample = sample(sim.subpopulations.individuals, 50)
+      slimr_output(ind_sample.genomes.output(), "pop_sample", do_every = 1);
+      slimr_output(ind_sample.genomes.individual.subpopulation, "subpops", do_every = 1)
+    }
+    
+  }),
+  
+  slim_block(1000, late(), {
+    sim.simulationFinished()
+  })
+  
+) -> pop_sim_samp
+
+```
+
+Let's give it a try!
+
+```{r test_samp}
+
+samp_script <- slimr_script_render(pop_sim_samp, template = list(migration_rate = 0.5,
+                                                                 selection_strength = 1e-12,
+                                                                 abund_threshold = 0))
+
+samp_res <- slim_run(samp_script)
+
+```
+
+Just to confirm we sampled the generations we wanted:
+
+```{r confirm_timing}
+samp_res$output_data$generation
+sample_these
+```
+
+
+Last but not least, this is the session information for this run of the above code. We can only guarantee reproducibility of this document if the session where it is being run matches the following:
+
+```{r session_info}
+library(sessioninfo)
+session_info()
 ```

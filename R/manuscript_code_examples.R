@@ -101,3 +101,105 @@ script_1
 
 slimr_script_render(script_1, data.frame(mut_rate = c(1e-6, 1e-8),
                                          genome_size = c(1e5, 1e6)))
+
+
+
+
+
+pop_sim <- slim_script(
+  
+  slim_block(initialize(), {
+    
+    initializeMutationRate(slimr_template("mut_rate", 1e-6));
+    initializeMutationType("m1", 0.5, "n", 0, slimr_template("selection_strength", 0.1));
+    initializeGenomicElementType("g1", m1, 1.0);
+    initializeGenomicElement(g1, 0, slimr_template("genome_size", 50000) - 1);
+    initializeRecombinationRate(slimr_template("recomb_rate", 1e-8));
+    initializeSex("A");
+    defineConstant("abund", slimr_inline(pop_abunds, delay = TRUE));
+    defineConstant("sample_these", slimr_inline(sample_these, delay = TRUE));
+    
+  }),
+  slim_block(1, {
+    
+    init_pop = slimr_inline(init_popsize, delay = TRUE)
+    
+    ## set populations to initial size
+    sim.addSubpop("p1", asInteger(init_pop[0]));
+    sim.addSubpop("p2", asInteger(init_pop[1]));
+    sim.addSubpop("p3", asInteger(init_pop[2]));
+    
+  }),
+  
+  slim_block(1, late(), {
+    ## get starting population from a file which we will fill-in later
+    sim.readFromPopulationFile(slimr_inline(starting_pop, delay = TRUE));
+    ## migration on or off flags for pops 1-3 (using tag)
+    p1.tag = 0;
+    p2.tag = 0;
+    p3.tag = 0;
+  }),
+  
+  slim_block(1, 1000, late(), {
+    
+    ## update generation number
+    gen = sim.generation %% 50
+    if(gen == 0) {
+      gen = 50
+    }
+    
+    ## set population size to observed levels
+    p1.setSubpopulationSize(asInteger(ceil(abund[0, gen - 1] * slimr_template("popsize_scaling", 100))));
+    p2.setSubpopulationSize(asInteger(ceil(abund[1, gen - 1] * ..popsize_scaling..)));
+    p3.setSubpopulationSize(asInteger(ceil(abund[2, gen - 1] * ..popsize_scaling..)));
+    
+    ## increase migration when above abundance threshold
+    if(p1.tag == 0 & abund[0, gen - 1] > slimr_template("abund_threshold", 5)) {
+      p2.setMigrationRates(p1, slimr_template("migration_rate", 0))
+      p3.setMigrationRates(p1, ..migration_rate..)
+      p1.tag = 1;
+    } 
+    if(p1.tag == 1 & abund[0, gen - 1] <= ..abund_threshold..) {
+      p2.setMigrationRates(p1, 0)
+      p3.setMigrationRates(p1, 0)
+      p1.tag = 0;
+    }
+    
+    if(p2.tag == 0 & abund[1, gen - 1] > ..abund_threshold..) {
+      p1.setMigrationRates(p2, ..migration_rate..)
+      p3.setMigrationRates(p2, ..migration_rate..)
+      p2.tag = 1;
+    } 
+    if(p2.tag == 1 & abund[1, gen - 1] <= ..abund_threshold..) {
+      p1.setMigrationRates(p2, 0)
+      p3.setMigrationRates(p2, 0)
+      p2.tag = 0;
+    }    
+    
+    if(p3.tag == 0 & abund[2, gen - 1] > ..abund_threshold..) {
+      p1.setMigrationRates(p3, ..migration_rate..)
+      p2.setMigrationRates(p3, ..migration_rate..)
+      p3.tag = 1;
+    } 
+    if(p3.tag == 1 & abund[2, gen - 1] <= ..abund_threshold..) {
+      p1.setMigrationRates(p3, 0)
+      p2.setMigrationRates(p3, 0)
+      p3.tag = 0;
+    }
+    
+    if(any(match(sample_these, sim.generation) >= 0)) {
+      ind_sample = sample(sim.subpopulations.individuals, 50)
+      slimr_output(ind_sample.genomes.output(), "pop_sample", do_every = 1);
+    }
+    
+  }),
+  
+  slim_block(1000, late(), {
+    sim.simulationFinished()
+  })
+  
+)
+
+result <- slim_run(slimr_script_render(pop_sim))
+
+
