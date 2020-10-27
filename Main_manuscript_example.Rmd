@@ -455,7 +455,7 @@ So this shows that our three populations are characterized by mostly non-overlap
 Okay, to get an idea of what sort of dynamics of Fst we will get with different versions of this simulation, let's create a version where we calculate Fst during the simulation, and output it for tracking. Then we can make some time-series plots. When it comes to comparing simulation outputs to our actual data we will make yet another version where we will only output just before, during, and just after the population explosions corresponding to rainfall. To add a Fst calculation to our simulation we will use the `slim_function` function, which allows you to specify a SLiM function to use in your SLiM code. This Fst function is based on the one described in the SLiM manual, and can also be found online here: [https://github.com/MesserLab/SLiM-Extras/blob/master/functions/calcFST.txt](https://github.com/MesserLab/SLiM-Extras/blob/master/functions/calcFST.txt).
 
 ```{r track_version}
-pop_sim <- slim_script(
+slim_script(
   
   slim_function("o<Subpopulation>$ subpop1", "o<Subpopulation>$ subpop2",
                 name = "calcFST",
@@ -734,17 +734,18 @@ plot_cycle(fst_dat_4, pop_mean)
 animate_cycle(fst_dat_4, pop_mean)
 
 ```
+
 Again we see those fluctuations. All in all, this suggests that it is likely to be difficult to distinguish what processes are driving the pattern of Fst we see in our study. There clearly are some differences in the details of the dynamics, particularly when you compare our cycle plots between the different scenarios. However, we only have three years of data, just spanning a rainfall (or population explosion) event, which means considerably less information to go on. It looks like it is going to be difficult to disentangle the effects of migration from just the effects of population size, which is perhaps not surprising, given that these two factors are linked in our model (e.g. our hypothesis is that migration increases with high rainfall, which also is linked with population increases). Unfortunately the two processes have a similar effect on Fst, migration creates gene flow which reduces population differentiation, but increasing population increases effective population size, and thus reducing the strength of drift relative to selection, me
 
 So the next thing we should do is get our simulation to output data we can compare directly to our data. In this case we will just output full population information at several time points, and calculate Fst post-hoc using `dartR` so that our methods of calculating Fst are the same. We will also sample the subpopulations in our simulation to try and match sample size with our real data as well.
 
 ```{r add_sampling}
 
-pop_sim <- slim_script(
+slim_script(
   
   slim_block(initialize(), {
     
-    initializeSLiMOptions(keepPedigrees=T);
+    #initializeSLiMOptions(keepPedigrees=T);
     initializeMutationRate(slimr_template("mut_rate", 1e-6));
     initializeMutationType("m1", 0.5, "n", 0, slimr_template("selection_strength", 0.1));
     initializeGenomicElementType("g1", m1, 1.0);
@@ -853,9 +854,81 @@ samp_res <- slim_run(samp_script)
 Just to confirm we sampled the generations we wanted:
 
 ```{r confirm_timing}
-samp_res$output_data$generation
+unique(samp_res$output_data$generation)
 sample_these
 ```
+The last step is to take the output of the simulation, convert it into a set of `genlight` objects, and then calculate Fst on those using the same function used to calculate Fst for our real data. Then we can plot a distribution of expected Fst values at our three time points based on this simulation, and compare that with our real data.  We can convert the genomic information to genlight using `slim_output_genlight()`. By specifying the `name` argument, `slim_output_genlight()` will only use rows with that name. Additionally we can create a separate genlight for each generation sample by using the `by` argument, like this:
+
+```{r convert_to_genlight}
+
+slim_genlights <- slim_output_genlight(samp_res, name = "pop_sample",
+                                       by = "generation")
+
+slim_genlights
+```
+We now have a tibble containing genlight objects for each generation sample. Let's plot one to make sure it worked.
+
+```{r plot_one_gl}
+plot(slim_genlights$genlight[[1]])
+```
+
+Now because we output a sample of individuals' genomes in our simulation, and SLiM doesn't include information on the subpopulation of origin in its genome output, we also output the associated subpopulation for each genome and included it the `"subpops"` data rows. We can now extract this and reassociate with the genome data. This is possible because SLiM always outputs this data in the same order. Note that we sampled 50 individuals which means we have 100 genomes. These were reassembled into individuals by `slim_output_genlight()`, and we can likewise aggregate our subpopulation information by noting that SLiM always outputs the two genomes from a single individual one after the other. We can use the `slimr` function `slim_results_to_data()` function which automatically attempts to convert the data stored in our results object to usable data in the form of a tibble.
+
+```{r get_subpop_data}
+slim_subpops <- samp_res$output_data %>%
+  filter(name == "subpops") %>%
+  slim_results_to_data() 
+
+slim_subpops 
+
+slim_subpops <- slim_subpops %>%
+  unnest_longer(col = data, values_to = "subpop", indices_to = "genome_num") %>%
+  mutate(individual_num = rep(1:50, each = 2) %>%
+           rep(length(sample_these)))
+
+slim_subpops
+
+slim_subpops <- slim_subpops %>%
+  group_by(generation, individual_num) %>%
+  summarise(subpop = subpop[1],
+            .groups = "drop")
+
+slim_subpops
+```
+Okay, now we can add this to the genlights we generated earlier.
+
+```{r add_pop_to_gl}
+## reorder by individual label
+slim_genlights$genlight <- map(slim_genlights$genlight,
+                               ~.x[order(as.numeric(.x$ind.names)), ])
+
+slim_genlights$genlight <- map2(slim_genlights$genlight, 
+                                slim_subpops %>%
+                                  group_split(generation),
+                                ~{pop(.x) <- .y$subpop; .x})
+```
+
+Let's look at that plot again but reordered by population.
+
+```{r plot_reordered}
+test_gl <- slim_genlights$genlight[[1]]
+test_gl <- test_gl[order(pop(test_gl)), ]
+plot(test_gl)
+```
+
+Now we are ready to calculate our pairwise Fsts for each sample. 
+
+```{r fst_on_sim}
+fst_by_generation_sim <- map(slim_genlights$genlight,
+                   ~gl.fst.pop(.x,
+                               nboots = 1L) %>%
+                     as.dist() %>%
+                     as.matrix())
+names(fst_by_generation_sim) <- slim_genlights$generation
+fst_by_generation_sim
+```
+
+So in this simulation we have very low pairwise fst, including a fair number of negative numbers. This is expected given the high level of migration we used in the simulation (essentially we simulated just one panmictic population, with very weak selection).
 
 
 Last but not least, this is the session information for this run of the above code. We can only guarantee reproducibility of this document if the session where it is being run matches the following:
