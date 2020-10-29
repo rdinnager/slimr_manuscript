@@ -48,7 +48,7 @@ coords <- gen_meta %>%
 
 sites1 <- sf::st_as_sf(coords, coords = c("lon", "lat"), crs = 4326)
 #mapview(coords, xcol = "lon", ycol = "lat", label = coords$pop)
-mapview(sites1, label = coords$pop)
+mapview(sites1, label = coords$pop, map.types = "Esri.WorldImagery")
 
 gen_meta <- gen_meta %>%
   mutate(three_pop = case_when(pop %in% c("MC", "SS", "WS") ~ "BR",
@@ -65,7 +65,7 @@ coords_3 <- gen_meta %>%
 
 sites_3 <- sf::st_as_sf(coords_3, coords = c("lon", "lat"), crs = 4326)
 #mapview(coords_3, xcol = "lon", ycol = "lat", label = coords_3$three_pop)
-mapview(sites_3, label = coords_3$three_pop)
+mapview(sites_3, label = coords_3$three_pop, map.types = "Esri.WorldImagery")
 
 pop(gen) <- gen_meta$three_pop
 gen@other$ind.metrics <- gen_meta
@@ -409,7 +409,7 @@ grDevices::X11(width = 14, height = 8)
 sim_res <- slim_run(test_default, capture_output = "|", 
                     callbacks = list(vis_fun))
 
-
+sim_res_no_vis <- slim_run(test_default)
 
 
 test_2 <- slimr_script_render(pop_sim, template = list(popsize_scaling = scaling,
