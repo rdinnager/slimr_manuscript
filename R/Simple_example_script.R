@@ -61,7 +61,7 @@ script_1
 
 ########## run script ###############
 
-results <- slim_run(script_1, progress = FALSE)
+results <- slim_run(script_1)
 
 ########### convert to genlight ###########
 
@@ -117,7 +117,7 @@ script_2
 
 ########## render template ###########
 ## edit below to render
-slimr_script_render(script_2, template = list(pop_size = 100,
+slimr_script_render(script_2, template = list(pop_size = 200,
                                               m = 0.1))
 
 ## you can also use a data.frame

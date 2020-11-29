@@ -68,7 +68,6 @@ gen
 abund <- read_csv("data/mammal_captures.csv")
 
 abund
-
 ```
 
 So we have SNP sequences from 167 individuals taken over three years and several different sites. Before we take a look at the genetic data, let's set the environmental context a bit. These small mammals live in the Simpson Desert, an arid ecosystem characterized by long periods of little rain, with occasional major rainfall events. These tend to occur every 6-10 years. After rainfall events, the desert turns green, it can be seen from space, and our analysis of satellite reflectance data confirms massive spikes in productivity after these rainfalls. Plants grow, flower and seed massively during these periods, and so food is abundant for small mammals. We can see the regular pulse of rainfall just by looking at the mammal abundances -- *Pseudomys hermannsburgensis* in particular responds quickly to rainfall. Let's look at our live trapping data on abundances to see this pattern.
@@ -372,8 +371,8 @@ init_popsize <- c(table(pop(gen_2008)))
 starting_pop = here("sims/starting_pop.txt") %>%
   slim_file()
 ## setup generations to sample
-## we will just sample the three years corresponding to the data, but do it during the last three cycles, as "technical" replicates
-sample_these <- purrr::map(c(17:19),
+## we will just sample the three years corresponding to the data, but do it during the last 6 cycles, as "technical" replicates
+sample_these <- purrr::map(c(14:19),
                            ~50*.x + sample_times) %>%
   purrr::reduce(union)
 ```
@@ -901,7 +900,7 @@ Okay, now we can add this to the genlights we generated earlier.
 ## reorder by individual label
 slim_genlights$genlight <- map(slim_genlights$genlight,
                                ~.x[order(as.numeric(.x$ind.names)), ])
-
+## add subpop data
 slim_genlights$genlight <- map2(slim_genlights$genlight, 
                                 slim_subpops %>%
                                   group_split(generation),
@@ -928,8 +927,118 @@ names(fst_by_generation_sim) <- slim_genlights$generation
 fst_by_generation_sim
 ```
 
-So in this simulation we have very low pairwise fst, including a fair number of negative numbers. This is expected given the high level of migration we used in the simulation (essentially we simulated just one panmictic population, with very weak selection).
+So in this simulation we have very low pairwise fst, including a fair number of negative numbers. This is expected given the high level of migration we used in the simulation (essentially we simulated just one panmictic population, with very weak selection). Now we can write a little funnction to summarise these results, and plot them along with our observed values. Then we can run a few more simulations with different parameters and see how they stack up!
 
+```{r plot_fst_fun}
+sim_result <- samp_res
+observed_fst <- fst_df
+plot_fst_comparison <- function(sim_result, observed_fst, tech_reps = 6L) {
+  slim_genlights <- slim_output_genlight(sim_result, name = "pop_sample",
+                                       by = "generation")
+  
+  slim_subpops <- samp_res$output_data %>%
+  filter(name == "subpops") %>%
+  slim_results_to_data() %>%
+  unnest_longer(col = data, values_to = "subpop", indices_to = "genome_num") %>%
+  mutate(individual_num = rep(1:50, each = 2) %>%
+           rep(length(sample_these))) %>%
+  group_by(generation, individual_num) %>%
+  summarise(subpop = subpop[1],
+            .groups = "drop")
+  
+  ## reorder by individual label
+  slim_genlights$genlight <- map(slim_genlights$genlight,
+                                 ~.x[order(as.numeric(.x$ind.names)), ])
+  ## add subpop data
+  slim_genlights$genlight <- map2(slim_genlights$genlight, 
+                                  slim_subpops %>%
+                                    group_split(generation),
+                                  ~{pop(.x) <- .y$subpop; .x})
+  
+  
+  fst_by_year_sim <- map(slim_genlights$genlight,
+                     ~gl.fst.pop(.x,
+                                 nboots = 1L) %>%
+                       as.dist() %>%
+                       as.matrix())
+  names(fst_by_year_sim) <- rep(c("2006", "2007", "2008"), tech_reps)
+  
+  
+  fst_sim_df <- imap_dfr(fst_by_year_sim,
+                     ~combn(c("Subpopulation<p1>", 
+                              "Subpopulation<p2>", 
+                              "Subpopulation<p3>"), 2) %>%
+                       t() %>%
+                       as.data.frame() %>%
+                       rename(pop1 = V1, pop2 = V2) %>%
+                       mutate(fst = .x[cbind(pop1, pop2)],
+                              year = .y,
+                              pop_combo = paste(pop1, pop2, sep = " to "))) %>%
+    group_by(year) %>%
+    summarise(fst_mean = mean(fst), fst_sd = sd(fst))
+  
+  fst_obs_df <- observed_fst %>%
+    group_by(year) %>%
+    summarise(fst_mean = mean(fst))
+  
+  fst_plot_df <- bind_rows(fst_sim_df %>% mutate(type = "simulated"),
+                           fst_obs_df %>% mutate(type = "observed")) 
+  
+  ggplot(fst_plot_df, aes(year, fst_mean)) +
+    geom_point(aes(colour = type)) +
+    geom_path(aes(colour = type, group = type)) +
+    geom_errorbar(aes(ymin = fst_mean - fst_sd,
+                      ymax = fst_mean + fst_sd),
+                  width = 0.2) +
+    theme_minimal()
+}
+
+plot_fst_comparison(samp_res, fst_df)
+```
+
+This function plots the means of the pariwise Fst calculated from the simulation along with error bars representing 2 standard deviations around the mean. The red dots are the observed data. In this case, the match isn't very good, but the parameters we used for this simulation were deliberately chosen to produce unrealistic behaviour for our system. Let's try running our simulation again with some of the parameter combinations we explored earlier and see how this plot looks for them!
+
+```{r more_sims_1}
+## set migration rate to 0.5 (maximum migration, e.g. 50% of population switches place)
+## population will become panmictic over a certain popsize threshold
+fst_samp_2 <- slimr_script_render(pop_sim_samp, template = list(migration_rate = 0.5,
+                                                                selection_strength = 1e-12))
+
+## now run the sim and show plots of results
+samp_res_2 <- slim_run(fst_samp_2)
+plot_fst_comparison(samp_res_2, fst_df)
+```
+Okay, well that simulation produces Fsts within a similar range as the observed, but interestingly the pattern of high Fst followed by low Fst immediately after the population maxima is not reproduced. This is something that we couldn't tell from the plots of Fst over time, which showed fluctuations but did not show the detail of exactly when the fluctuations occurred. Let's try another set of parameters! It is also possible that using only a single simulation run is quite unreliable. In a more formal analysis in addition to sampling multiple time points in a single simulation, we would also want to rerun the entire simulation many times to get an idea of how much variation can be generated.
+
+```{r more_sims_2}
+## set migration rate to 0.5 (maximum migration, e.g. 50% of population switches place)
+## population is panmictic all the time with abund_threshold = 0,
+## now there is stronger selection too
+fst_samp_3 <- slimr_script_render(pop_sim_samp, template = list(migration_rate = 0.5,
+                                                                selection_strength = 0.2,
+                                                                abund_threshold = 0))
+
+## now run the sim and show plots of results
+samp_res_3 <- slim_run(fst_samp_3)
+plot_fst_comparison(samp_res_3, fst_df)
+```
+Now we get the drop but the Fst values are much lower. This is in constrast to what we saw previously for this simulation. This must have to do with how we calculated Fst using a very simple method previously. Using the empirical method on subsampled individuals actually gives a different picture.
+
+```{r more_sims_3}
+## set migration rate to 0.01 (so quite low)
+## population is migrating only above trapping abundance of 5
+## almost no selection
+fst_samp_4 <- slimr_script_render(pop_sim_samp, template = list(migration_rate = 0.0,
+                                                                selection_strength = 1e-12,
+                                                                abund_threshold = 5))
+
+## now run the sim and show plots of results
+samp_res_4 <- slim_run(fst_samp_4)
+plot_fst_comparison(samp_res_4, fst_df)
+
+
+```
+This gives a similar picture, suggesting our previous Fst calculation method was perhaps fatally flawed. Unfortunately I think I need to look into this!! Sorry, everyone!
 
 Last but not least, this is the session information for this run of the above code. We can only guarantee reproducibility of this document if the session where it is being run matches the following:
 

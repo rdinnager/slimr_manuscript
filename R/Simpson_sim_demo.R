@@ -384,9 +384,10 @@ make_vis_function <-  function(ylims = c(N = NA, fst = NA)) {
     fst_dat <<- dplyr::bind_rows(fst_dat, all_dat$fst)
     N_dat <<- dplyr::bind_rows(N_dat, all_dat$N)
     p1 <- {N_base +
-        geom_path(aes(colour = factor(pop)), data = N_dat)} +
+        geom_path(aes(colour = factor(pop)), data = N_dat,
+                  size = 1)} +
     {fst_base +
-        geom_path(data = fst_dat)} +
+        geom_path(data = fst_dat, size = 2)} +
       plot_layout(ncol = 1)
     
     #print("is it here?")
