@@ -1,4 +1,5 @@
 library(slimr)
+library(adegenet)
 
 slim_script(
   slim_block(initialize(),
@@ -11,8 +12,8 @@ slim_script(
              }),
   slim_block(1,
              {
-               slimr_track_progress();
-               sim%.%.SS$addSubpop(subpopID = "P1", 500)
+               #slimr_track_progress();
+               sim%.%.SS$addSubpop(subpopID = "p1", size = 500)
              }),
   slim_block(10000,
              {
@@ -20,7 +21,22 @@ slim_script(
                sim.simulationFinished();
              })
   ) -> script_1
+suppressWarnings({
+
   
+options(warn=-1)  
+  
+  
+    
+run_1 <- slim_run(script_1)
+data_1 <- slim_output_genlight(run_1)
+
+plot(data_1)
+
+
+
+
+})
 
 slim_script(
   slim_block(initialize(),
