@@ -1,7 +1,7 @@
 ---
 title: "Using slimr to investigate the population genetics of the Sandy Inland Mouse in the periodic rainfall environment of the Simpson Desert"
 author: "Russell Dinnage"
-date: "30/04/2021"
+date: "17/07/2023"
 output:
   html_document:
     df_print: paged
@@ -12,13 +12,18 @@ output:
 knitr::opts_chunk$set(echo = TRUE,
                       fig.width = 7,
                       fig.height = 6,
-                      out.width = "80%")
+                      out.width = "80%",
+                      cache = FALSE)
 if(file.exists(here::here("sims/starting_pop.txt"))) {
   file.remove(here::here("sims/starting_pop.txt"))
 }
+# options(error = function() {
+#   sink()
+#   recover()
+# })
 ```
 
-```{r color, echo = FALSE, results='asis'}
+```{r color, echo = FALSE, results='asis', cache=FALSE}
 # crayon needs to be explicitly activated in Rmd
 options(crayon.enabled = TRUE)
 # Hooks needs to be set to deal with outputs
@@ -27,13 +32,14 @@ if(requireNamespace("fansi", quietly = TRUE)) {
   old_hooks <- fansi::set_knit_hooks(knitr::knit_hooks, 
                                      which = c("output", "message", "error"))
 }
+set.seed(12345)
 ```
 
 ## A look at the data
 
 An ongoing project in the Simpson Desert of central Australia is producing genomic sequence data for small mammals and reptiles collected over more than 30 years. We have some preliminary data from this project for the Sandy Inland Mouse (*Pseudomys hermannsburgensis*) that we'd like to use to explore, through data analysis and simulation, and hopefully gain some insight into where this project might ultimately take us. First let's load all the packages we use in the example, and then load the genetic data we will be working with. The data is stored in an `.Rdata` file containing a `genlight` object, which stores binary Single Nucleotide Polymorphism (SNP) data, defined in the `adegenet` package. We also have demographic data in the form of trap capture data (captures per 100 trap nights; see [Dickman et al. 2014](https://www.researchgate.net/publication/281365144_Desert_complex_environments) and [Greenville et al. 2016](https://esajournals.onlinelibrary.wiley.com/doi/full/10.1002/ecs2.1343) for capture methods).
 
-```{r setup_data, message=FALSE, warning=FALSE}
+```{r setup_data, message=FALSE, warning=FALSE, cache=FALSE}
 library(readr)
 library(dplyr)
 library(tidyr)
@@ -51,9 +57,26 @@ library(directlabels)
 library(patchwork)
 library(sf)
 library(adegenet)
-library(dartR)
 library(here)
 library(stringr)
+
+## install dependencies for dartR if you don't have them
+if (!require("SNPRelate", quietly = TRUE)) {
+  if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+  BiocManager::install("SNPRelate")
+  if (!require("dartR", quietly = TRUE))
+    install.packages("dartR")
+}
+
+## install slimr if you don't have it already
+if (!require("slimr", quietly = TRUE)) {
+  if (!require("devtools", quietly = TRUE))
+    install.packages("devtools")
+  devtools::install_github("rdinnager/slimr")
+}
+
+library(dartR)
 library(slimr)
 
 mapviewOptions(fgb = FALSE)
@@ -61,44 +84,22 @@ mapviewOptions(fgb = FALSE)
 ## because filter function exists in multiple packages we use
 ## the conflicted package to make sure we R uses the version in dplyr
 conflict_prefer("filter", "dplyr") 
+conflict_prefer("select", "dplyr")
 conflict_prefer("initialize", "slimr")
 
 ## load data
-gen <- read_rds("data/herm.rdata")
+gen <- read_rds(system.file("extdata/herm.rdata", package = "slimr"))
 
 gen
 
-abund <- read_csv("data/mammal_captures.csv")
+abund_summ <- read_csv(system.file("extdata/hermannsburg_abund.csv", package = "slimr"))
 
-abund
+abund_summ
 ```
 
 So we have SNP sequences from 167 individuals taken over three years and several different sites. Before we take a look at the genetic data, let's set the environmental context a bit. These small mammals live in the Simpson Desert, an arid ecosystem characterized by long periods of little rain, with occasional major rainfall events. These tend to occur every 6-10 years. After rainfall events, the desert turns green, it can be seen from space, and our analysis of satellite reflectance data confirms massive spikes in productivity after these rainfalls. Plants grow, flower and seed massively during these periods, and so food is abundant for small mammals. We can see the regular pulse of rainfall just by looking at the mammal abundances -- *Pseudomys hermannsburgensis* in particular responds quickly to rainfall. Let's look at our live trapping data on abundances to see this pattern.
 
 ```{r analyse_traps}
-## give more descriptive names to sites
-sites <- tribble(~pop, ~SiteName,
-                 "CS", "Carlo",
-                 "FRN", "Field River North",
-                 "FRS", "Field River South",
-                 "KSE", "Kunnamuka Swamp East",
-                 "MC", "Main Camp",
-                 "SS", "South Site",
-                 "WS", "Way Site"
-)
-
-abund_summ <- abund %>%
-  select(-`Notomys alexis`, -`Sminthopsis youngsoni`) %>%
-  left_join(sites) %>%
-  drop_na(pop) %>%
-  ## convert month-year character column to proper dates using lubridate
-  separate(MonthYear, c("Month", "year"), "\\.") %>%
-  mutate(Month = sapply(Month, function(x) which(month.abb == x))) %>%
-  mutate(date = myd(paste(Month, year, sep = "-"), truncated = 1)) %>%
-  ## summarise by site and date
-  group_by(date, pop) %>%
-  summarise(abund = mean(`Pseudomys hermannsburgensis`),
-            .groups = "drop") 
 
 ggplot(abund_summ, aes(date, abund)) +
   geom_path(aes(colour = pop)) +
@@ -117,6 +118,16 @@ Okay, now let's go have a look at the SNP data we have for these populations.
 First, we will extract the metadata for the genetic samples and have a look at how they are distributed in the Simpson Desert.
 
 ```{r map_gene_data}
+sites <- tribble(~pop, ~SiteName,
+                 "CS", "Carlo",
+                 "FRN", "Field River North",
+                 "FRS", "Field River South",
+                 "KSE", "Kunnamuka Swamp East",
+                 "MC", "Main Camp",
+                 "SS", "South Site",
+                 "WS", "Way Site"
+)
+
 gen_meta <- gen@other$ind.metrics
 
 gen_meta <- gen_meta %>%
@@ -132,7 +143,7 @@ gen_meta
 
 Extract and plot site coordinates:
 
-```{r plot_map, fig.cap="This is an interactive map in the html version", fig.height=8, fig.width=8}
+```{r plot_map, fig.cap="This is an interactive map in the html version", fig.height=8, fig.width=8, cache=FALSE}
 coords <- gen_meta %>%
   group_by(pop) %>%
   summarise(lon = mean(lon),
@@ -145,7 +156,7 @@ mapview(coords, label = coords$pop, map.types = "Esri.WorldImagery")
 
 Looks like our sites cluster into roughly 3 spatial groups. For simplicity we can merge these sites into 3 subpopulations, which will make it a bit simpler for our simulation later. 
 
-```{r merge_pops, fig.cap="This is an interactive map in the html version", fig.height=8, fig.width=8}
+```{r merge_pops, fig.cap="This is an interactive map in the html version", fig.height=8, fig.width=8,cache=FALSE}
 coords_3 <- gen_meta %>%
   mutate(three_pop = case_when(pop %in% c("MC", "SS", "WS") ~ "BR",
                                pop %in% c("FRN", "FRS") ~ "BL",
@@ -233,7 +244,7 @@ We can visualize that over the three years:
 
 ```{r vis_fst}
 fst_df <- imap_dfr(fst_by_year,
-                   ~combn(c("BR", "BL", "TR"), 2) %>%
+                   ~combn(c("BL", "BR", "TR"), 2) %>%
                      t() %>%
                      as.data.frame() %>%
                      rename(pop1 = V1, pop2 = V2) %>%
@@ -244,9 +255,105 @@ fst_df <- imap_dfr(fst_by_year,
 ggplot(fst_df, aes(year, fst)) +
   geom_path(aes(colour = pop_combo, group = pop_combo)) +
   theme_minimal()
+
+## save for later
+write_rds(fst_df, "data/fst_df.rds")
 ```
 
-So we see that during the rainfall year a precipitous drop in Fst occurs, which has only partially recovered the following year. Now, can we think of a reason why this pattern might occur? We have a hypothesis! First, we'll lay it out, then we will interrogate its logic using the simulation tools provided by `slimr`. Earlier on we talked about how the desert "turns green" after a big rainfall event. This implies it reverts back to dry or "red" sands afterwards. Generally this is true, however, some patches remain relatively green during the dry periods. These are sometimes know as mesic 'refugia'. We hypothesized that during dry periods, our mouse population recedes into these separate refugia across the landscape, where they become relatively reproductively isolated. This leads to an inexorable increase in Fst due to a genetic drift without gene flow. Then, when the rain comes, the whole landscape becomes wet, the mice come out to play, spreading throughout, reproducing along the way. The subpopulations of the refugia intermix, leading to an erasure of the genomic differentiation that had been in progress during the dry years. But can this mechanism lead to the level of observed change in such a short period? Are there other possible mechanisms? Let's explore these ideas with simulation!
+So we see that during the rainfall year a precipitous drop in Fst occurs, which has only partially recovered the following year. But perhaps before we proceed we should make sure this difference in Fst is really more than what we would expect based on random variation. To do this we will use a simple boostrapping approach.
+
+```{r mmod_ci, cache=TRUE}
+## split populations by site and year to make it easier to bootstrap within
+pop_year <- paste(pop(gen), gen@other$ind.metrics$year, sep = "_")
+gen_set_bs <- gen 
+pop(gen_set_bs) <- as.factor(pop_year)
+## resample 15 individuals (with replacement) for each year site combination
+gen_bs <- replicate(200, gl.sample(gen_set_bs, nsample = 15, verbose = 0), simplify = FALSE)
+## run pairwise Fst code on each bootstrap sample
+fst_bs <- map(gen_bs,
+              ~ map(c("2006", "2007", "2008"),
+                   function(year) pairFST(.x[grep(year, as.character(pop(.x))), ]) %>%
+                     as.dist() %>%
+                     as.matrix()) %>%
+                setNames(c("2006", "2007", "2008")))
+## convert to tibble
+fst_bs_df <- lapply(fst_bs, function(x) imap_dfr(x,
+                                                 ~ combn(c("BL", "BR", "TR"), 2) %>%
+                                                   t() %>%
+                                                   as.data.frame() %>%
+                                                   rename(pop1 = V1, pop2 = V2) %>%
+                                                   mutate(pop_1 = paste(pop1, .y, sep = "_"),
+                                                          pop_2 = paste(pop2, .y, sep = "_")) %>%
+                                                   mutate(fst = .x[cbind(pop_1, pop_2)],
+                                                          year = .y,
+                                                          pop_combo = paste(pop1, pop2, sep = " to ")))) %>%
+  imap(~ .x %>% mutate(rep = .y)) %>%
+  list_rbind()
+## create fst ci
+fst_ci <- fst_bs_df %>%
+  group_by(year, pop_combo) %>%
+  summarise(mean_fst = mean(fst),
+            ci_lower = quantile(fst, 0.025),
+            median_fst = quantile(fst, 0.5),
+            ci_upper = quantile(fst, 0.975))
+## test year diffs
+fst_years_diffs <- fst_bs_df %>%
+  group_by(year, rep) %>%
+  summarise(fst = mean(fst)) %>%
+  group_by(rep) %>%
+  summarise(year_07_06 = fst[year == "2006"] - fst[year == "2007"],
+            year_08_06 = fst[year == "2008"] - fst[year == "2006"],
+            year_07_08 = fst[year == "2008"] - fst[year == "2007"]) %>%
+  summarise(year_07_06_mean = mean(year_07_06),
+            year_07_06_lower = quantile(year_07_06, 0.025),
+            year_07_06_median = quantile(year_07_06, 0.5),
+            year_07_06_upper = quantile(year_07_06, 0.975),
+            year_08_06_mean = mean(year_08_06),
+            year_08_06_lower = quantile(year_08_06, 0.025),
+            year_08_06_median = quantile(year_08_06, 0.5),
+            year_08_06_upper = quantile(year_08_06, 0.975),
+            year_07_08_mean = mean(year_07_08),
+            year_07_08_lower = quantile(year_07_08, 0.025),
+            year_07_08_median = quantile(year_07_08, 0.5),
+            year_07_08_upper = quantile(year_07_08, 0.975))
+```
+
+Here is the same plot as above but with bootstrapped errorbars with 95% confidence intervals. 
+
+```{r plot_bs}
+ggplot(fst_ci, aes(year, mean_fst)) +
+  geom_path(aes(colour = pop_combo, group = pop_combo)) +
+  geom_point(aes(colour = pop_combo, group = pop_combo)) +
+  geom_errorbar(aes(colour = pop_combo, group = pop_combo,
+                    ymin = ci_lower, ymax = ci_upper),
+                width = 0.1) +
+  theme_minimal()
+```
+
+It is hard to tell whether these differences are meaningful, but the `fst_years_diffs` has bootstrapped estimates of the mean difference between years. Any confidence interval that does not overlap zero consitutes evidence that there is a real difference between those years.
+
+```{r plot_year_diff}
+year_diff_df <- fst_years_diffs %>%
+  pivot_longer(everything(), names_to = "label", values_to = "fst_diff") %>%
+  separate(label, c("chaff", "year_1", "year_2", "quant"), "_") %>%
+  mutate(year_1 = paste0("20", year_1),
+         year_2 = paste0("20", year_2)) %>%
+  select(-chaff) %>%
+  pivot_wider(names_from = quant, values_from = fst_diff) %>%
+  mutate(`Fst Difference` = paste0(year_1, " - ", year_2))
+
+ggplot(year_diff_df, aes(mean, `Fst Difference`)) +
+  geom_point() +
+  geom_linerange(aes(xmin = lower,
+                     xmax = upper)) +
+  geom_vline(xintercept = 0, linetype = 2) +
+  theme_minimal()
+
+```
+
+This suggests that indeed, on average, the populations in 2006 and 2008 were significantly higher in Fst than in the intervening year of 2007, but Fst was more or less equal when comparing 2008 to 2006. So a significant drop in Fst followed by a full recovery the next year.
+
+Now, can we think of a reason why this pattern might occur? We have a hypothesis! First, we'll lay it out, then we will interrogate its logic using the simulation tools provided by `slimr`. Earlier on we talked about how the desert "turns green" after a big rainfall event. This implies it reverts back to dry or "red" sands afterwards. Generally this is true, however, some patches remain relatively green during the dry periods. These are sometimes know as mesic 'refugia'. We hypothesized that during dry periods, our mouse population recedes into these separate refugia across the landscape, where they become relatively reproductively isolated. This leads to an inexorable increase in Fst due to a genetic drift without gene flow. Then, when the rain comes, the whole landscape becomes wet, the mice come out to play, spreading throughout, reproducing along the way. The subpopulations of the refugia intermix, leading to an erasure of the genomic differentiation that had been in progress during the dry years. But can this mechanism lead to the level of observed change in such a short period? Are there other possible mechanisms? Let's explore these ideas with simulation!
 
 
 ## A simple simulation
@@ -264,6 +371,8 @@ migration_rates    | rate of migration amongst three pops when abundance is high
 abund_threshold    | abundance (before scaling) above which migration between populations is "turned" on
 recomb_rate        | recombination rate, a nuisance parameter
 popsize_scaling    | multiply observed abundances by this value to get total subpop size
+
+It should be noted that the following simulation are for SLiM version 4.0 or greater. They should also work in SLiM <4.0 by changing any references to `sim.cycle` to `sim.generation`. 
 
 Now for the code:
 
@@ -309,7 +418,8 @@ pop_sim <- slim_script(
   slim_block(1, 1000, late(), {
     
     ## update generation number
-    gen = sim.generation %% 50
+    ## note in SLiM versions < 4.0, this would be sim.generation instead
+    gen = sim.cycle %% 50
     if(gen == 0) {
       gen = 50
     }
@@ -409,6 +519,9 @@ lines(pop_abunds[1, ], col = "red")
 lines(pop_abunds[3, ], col = "green")
 abline(v = sample_times)
 
+## save for later use
+write_rds(pop_abunds, "data/pop_abunds.rds")
+
 
 ```
 
@@ -427,6 +540,10 @@ starting_pop = here("sims/starting_pop.txt") %>%
 sample_these <- purrr::map(c(14:19),
                            ~50*.x + sample_times) %>%
   purrr::reduce(union)
+
+## save for later
+write_rds(sample_these, "data/sample_these.rds")
+write_rds(init_popsize, "data/init_popsize.rds")
 ```
 
 Okay, now we are ready to use `slim_script_render` to generate a script we can run. The first thing we can try is to render the script without providing a template. Since we have provided defaults for all of our templated variables, this should generate a script with the default values (our 'default' script).
@@ -464,7 +581,7 @@ glimpse(snp_mat)
 ```
 Then, we make our starting population file!
 
-```{r make_pop_init}
+```{r make_pop_init, cache=FALSE}
 
 sexes <- as.character(gen_2008@other$ind.metrics$Sex)
 
@@ -507,7 +624,7 @@ So this shows that our three populations are characterized by mostly non-overlap
 
 Okay, to get an idea of what sort of dynamics of Fst we will get with different versions of this simulation, let's create a version where we calculate Fst during the simulation, and output it for tracking. Then we can make some time-series plots. When it comes to comparing simulation outputs to our actual data we will make yet another version where we will only output just before, during, and just after the population explosions corresponding to rainfall. To add a Fst calculation to our simulation we will use the `slim_function` function, which allows you to specify a SLiM function to use in your SLiM code. This Fst function is based on the one described in the SLiM manual, and can also be found online here: [https://github.com/MesserLab/SLiM-Extras/blob/master/functions/calcFST.txt](https://github.com/MesserLab/SLiM-Extras/blob/master/functions/calcFST.txt). We have already used the function as an R function when we calculated Fst for our observed data. Now we can convert it to a SLiM function. `slim_function` requires us to specify the function arguments and the function names as character strings, and then the body of the function as `slimr` code. If inserted into a `slim_script` call, the function will then be accessible inside the rest of the code in the `slim_script` call. We can use the previously specified R function code body by simply extracting it using `rlang::fn_body()`. We also need to make sure it is evaluated before insertion, which we assure using the evaluation forcing operator `!!`.
 
-*Note:* The latest version of SLiM (v3.5), which was released after the initial version of this vignette was written, now has a built-in function called `calcFST`, which means we technically no longer need to use a custom function for this functionality. However, we have kept this section of the vignette to show how custom functions can be specified and used in `slimr`.
+*Note:* The latest version of SLiM (v4.1), which was released after the initial version of this vignette was written, now has a built-in function called `calcFST`, which means we technically no longer need to use a custom function for this functionality. However, we have kept this section of the vignette to show how custom functions can be specified and used in `slimr`.
 
 ```{r track_version}
 slim_script(
@@ -552,7 +669,8 @@ slim_script(
   slim_block(1, 1000, late(), {
     
     ## update generation number
-    gen = sim.generation %% 50
+    ## note in SLiM versions < 4.0, this would be sim.generation instead
+    gen = sim.cycle %% 50
     if(gen == 0) {
       gen = 50
     }
@@ -792,6 +910,9 @@ samp_sizes <- table(gen$other$ind.metrics$three_pop, gen$other$ind.metrics$year)
 
 samp_sizes <- do.call(cbind, replicate(6, samp_sizes, simplify = FALSE))
 
+## save for later
+write_rds(samp_sizes, "data/samp_sizes.rds")
+
 slim_script(
   
   slim_block(initialize(), {
@@ -832,7 +953,8 @@ slim_script(
   slim_block(1, 1000, late(), {
     
     ## update generation number
-    gen = sim.generation %% 50
+    ## note in SLiM versions < 4.0, this would be sim.generation instead
+    gen = sim.cycle %% 50
     if(gen == 0) {
       gen = 50
     }
@@ -876,10 +998,11 @@ slim_script(
       p3.tag = 0;
     }
     
-    ## only run if the generation is in our sample_these list
-    if(any(match(sample_these, sim.generation) >= 0)) {
+    ## only run if the generation (cycle) is in our sample_these list
+    ## note in SLiM versions < 4.0, this would be sim.generation instead of sim.cycle
+    if(any(match(sample_these, sim.cycle) >= 0)) {
       ## find the sample size that matches the matching "year" for our obs data
-      ssizes = drop(samp_sizes[ , which(sample_these == sim.generation)]) 
+      ssizes = drop(samp_sizes[ , which(sample_these == sim.cycle)]) 
       ## sample individuals
       ind_sample = c(sample(p1.individuals, ssizes[0]),
                      sample(p2.individuals, ssizes[1]),
@@ -901,14 +1024,22 @@ slim_script(
 
 Let's give it a try! Here we will demonstrate another feature of `slimr`. By specifying a `reps` argument to `slim_script_render` we can generate replicate simulations. This returns a `slimr_script_coll` object, which stands for slimr script collection. This can be run using `slim_run` just like a regular `slimr_script`, but each simulation in the collection will be run, either sequentially, or in parallel, depending on what argument we use. We will run in parallel on 6 cores, and run 6 replicates of our entire simulation, with the same parameters. So then we will have 6 replicate samples within each simulation and 6 replicate simulation for a total of 36 replicates for each of our 3 sampling time points.
 
+To run in parallel we must first set a plan for the package `{future}`, which `{slimr}` uses under the hood for parallelism:
+
+```{r set_future_plan, cache=FALSE}
+
+plan(multisession(workers = 6))
+
+```
+
+Now we can run our script!
+
 ```{r test_samp}
 
 samp_script <- slim_script_render(pop_sim_samp, template = list(migration_rate = 0.5,
                                                                  selection_strength = 1e-12,
                                                                  abund_threshold = 0),
                                    reps = 6)
-
-plan(multisession(workers = 6))
 
 samp_res <- slim_run(samp_script, throw_error = TRUE,
                      parallel = TRUE)
@@ -939,6 +1070,7 @@ plot(slim_genlights$genlight[[1]])
 Now because we output a sample of individuals' genomes in our simulation, and SLiM doesn't include information on the subpopulation of origin in its genome output, we also output the associated subpopulation for each genome and included it the `"subpops"` data rows. We can now extract this and reassociate with the genome data. This is possible because SLiM always outputs this data in the same order. Note that we sampled 50 individuals which means we have 100 genomes. These were reassembled into individuals by `slim_extract_genlight()`, and we can likewise aggregate our subpopulation information by noting that SLiM always outputs the two genomes from a single individual one after the other. We can use the `slimr` function `slim_results_to_data()` function which automatically attempts to convert the data stored in our results object to usable data in the form of a tibble. This also works with a 
 
 ```{r get_subpop_data}
+
 slim_subpops <- samp_res[[1]]$output_data %>%
   filter(name == "subpops") %>%
   slim_results_to_data() 
@@ -1002,10 +1134,11 @@ plot_fst_comparison <- function(sim_result, observed_fst, tech_reps = 6L) {
   slim_genlights <- slim_extract_genlight(sim_result, name = "pop_sample",
                                        by = "generation")
   
-  names(samp_res) <- paste0("rep_", seq_along(samp_res))
+  names(sim_result) <- paste0("rep_", seq_along(sim_result))
   
-  slim_subpops <- imap_dfr(samp_res, ~ .x$output_data %>%
+  slim_subpops <- imap_dfr(sim_result, ~ .x$output_data %>%
                             filter(name == "subpops") %>%
+                            filter(!duplicated(generation)) %>% ## deals with an intermittent bug
                             slim_results_to_data() %>%
                             unnest_longer(col = data, values_to = "subpop",
                                           indices_to = "genome_num") %>%
@@ -1125,40 +1258,20 @@ samp_res_3 <- slim_run(fst_samp_3, throw_error = TRUE,
 plot_fst_comparison(samp_res_3, fst_df)
 ```
 
-Now the pattern across years is again similar to the real data, though again the rebound is a little too strong and again overall Fst values are too low. Let's try a very unrealistic set of parameters where we have no migration between populations at all.
+Now the pattern across years is again similar to the real data, though again the rebound is a little too strong and again overall Fst values are too low. To me, the second simulation that was based most strongly on our hypothesis was quite promising. Let's tweak the parameters of that one slightly to see if we can get a bit better fit.
 
 ```{r more_sims_3}
-## set migration rate to 0.01 (so quite low)
-## population is migrating only above trapping abundance of 5
-## almost no selection
-fst_samp_4 <- slim_script_render(pop_sim_samp, template = list(migration_rate = 0.0,
+fst_samp_4 <- slim_script_render(pop_sim_samp, template = list(migration_rate = 0.3,
                                                                 selection_strength = 1e-12,
-                                                                abund_threshold = 5),
+                                                                abund_threshold = 2),
                                   reps = 6)
 
 ## now run the sim and show plots of results
 samp_res_4 <- slim_run(fst_samp_4, throw_error = TRUE,
                        parallel = TRUE)
 plot_fst_comparison(samp_res_4, fst_df)
-
-
 ```
 
-Perhaps not surprisingly this lead to very high Fst values. This is probably due to two factors: 1) the starting population sizes in the simulation are very low, so we get a big bottleneck effect. Then, with no gene flow these subpopulations drift to completely different fixation patterns. To me, the second simulation that was based most strongly on our hypothesis was quite promising. Let's tweak the parameters of that one slightly to see if we can get a bit better fit.
-
-```{r more_sims_4}
-## set migration rate to 0.5 (maximum migration, e.g. 50% of population switches place)
-## population will become panmictic over a certain popsize threshold
-fst_samp_5 <- slim_script_render(pop_sim_samp, template = list(migration_rate = 0.3,
-                                                                selection_strength = 1e-12,
-                                                                abund_threshold = 2),
-                                  reps = 6)
-
-## now run the sim and show plots of results
-samp_res_5 <- slim_run(fst_samp_5, throw_error = TRUE,
-                       parallel = TRUE)
-plot_fst_comparison(samp_res_5, fst_df)
-```
 So that is not much better. So far, we haven't found a perfect simulation, but we have discovered that quite a range of different evolutionary scenarios can create fairly similar patterns. The next step may be to do some formal fitting of the simulation data to the observed using a method such as Approximate Bayesian Computation (ABC). This would be straightforward using `slimr`, since R already has good packages for performing ABC with custom simulation code. It may be the case that for distinguishing the evolutionary forces we are interested in here that we may need more data, or data of a different kind. We could also use simulation to further ask, is there anything we could measure or calculate, besides Fst, from the genomes of individuals, that could better distinguish multiple evolutionary forces? I will leave that project up to future work, but hopefully I have demonstrated the potential of having a tighter integration between data analysis platforms and simulation software.
 
 Last but not least, this is the session information for this run of the above code. We can only guarantee reproducibility of this document if the session where it is being run matches the following:

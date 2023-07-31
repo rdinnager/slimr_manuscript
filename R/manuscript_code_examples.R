@@ -76,22 +76,21 @@ disp_mat <- matrix(c(1, 1, 1, 2, 2, 2, 3, 3, 3,
 
 slim_script(
   ## minimal initialize block
-  slimr_block_init_minimal( 
+  slim_block_init_minimal( 
     ## template mut rate, genome size, and recomb
-    mut = slimr_template("mut_rate", 1e-7),
-    gen = slimr_template("genome_size", 99999),
-    recomb = slimr_template("recomb_rate", 1e-8)
+    mut = r_template("mut_rate", 1e-7),
+    gen = r_template("genome_size", 99999),
+    recomb = r_template("recomb_rate", 1e-8)
   ),
   
   ## setup pops and migration rates in first gen
   slim_block(1, {
-    
     for (i in 1:3) {
       sim.addSubpop(i, 100);
     }
     subpops = sim.subpopulations;
     ## pull in migration rate matrix from R
-    disp_mat = slimr_inline(disp_mat)
+    disp_mat = r_inline(disp_mat)
     
     for (line in seqLen(nrow(disp_mat))) {
       i = asInteger(disp_mat[line, 0]);
@@ -104,19 +103,17 @@ slim_script(
       }
     }
   }),
-  
   slim_block(100000, late(), {
     ## output full sim output at gen 100000
-    slimr_output(sim.outputFull(), 
-                 "final_output");
+    r_output(sim.outputFull(), 
+             "final_output");
   })
-  
 ) -> script_1
 
 script_1
 
-slimr_script_render(script_1, data.frame(mut_rate = c(1e-6, 1e-8),
-                                         genome_size = c(1e5, 1e6)))
+slim_script_render(script_1, data.frame(mut_rate = c(1e-6, 1e-8),
+                                        genome_size = c(1e5, 1e6)))
 
 
 
